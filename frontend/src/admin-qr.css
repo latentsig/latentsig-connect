@@ -1,0 +1,6 @@
+.event-qr{display:grid;justify-items:start;gap:8px;margin-top:5px}
+.event-qr-toggle{padding:0;border:0;background:transparent;color:#6556bd;font:inherit;font-size:9px;font-weight:700;cursor:pointer}
+.event-qr-panel{display:grid;justify-items:center;gap:8px;padding:10px;border:1px solid #e6e4f2;border-radius:9px;background:#fff}
+.event-qr-image{display:grid;place-items:center;padding:7px;background:#fff}
+.event-qr-image svg{display:block;width:176px;height:176px}
+.event-qr-panel a{color:#6254b2;font-size:10px;font-weight:700}

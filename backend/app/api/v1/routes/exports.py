@@ -1,0 +1,109 @@
+import io
+import json
+import re
+from datetime import date, datetime, timezone
+import uuid
+
+from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.api.v1.routes.admin import _filter_query, _latest_interaction
+from app.core.security import require_roles
+from app.db.models import AuditLog, Interaction, LeadNote, User
+from app.db.session import get_db
+
+router = APIRouter(prefix="/admin/exports", tags=["exports"])
+HEADERS = ["Lead ID", "Created At", "Full Name", "Company", "Job Title", "Email", "WhatsApp", "Website", "Interest", "Other Interest Details", "Intent", "Other Discussion Details", "Visitor Feedback", "Capture Method", "Source", "Captured By", "Assigned To", "Status", "Notes"]
+
+
+def _safe_cell(value):
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def _style_sheet(sheet, widths):
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="17213B")
+        cell.alignment = Alignment(vertical="center")
+    sheet.row_dimensions[1].height = 26
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[chr(64 + index)].width = width
+
+
+@router.get("/leads.xlsx")
+def export_leads(
+    search: str | None = None, event: str | None = None, status: str | None = None, interest: str | None = None,
+    intent: str | None = None, captured_by: str | None = None, assigned_to: uuid.UUID | None = None,
+    capture_method: str | None = None, date_from: date | None = None, date_to: date | None = None,
+    db: Session = Depends(get_db), user: User = Depends(require_roles("ADMIN", "MANAGER", "SALES")),
+):
+    query = _filter_query(_latest_interaction(), search, event, status, interest, intent, captured_by, assigned_to, capture_method, date_from, date_to, user)
+    pairs = db.execute(query.order_by(Interaction.created_at.desc())).all()
+    workbook = Workbook()
+    leads_sheet = workbook.active
+    leads_sheet.title = "Leads"
+    leads_sheet.append(HEADERS)
+    by_status: dict[str, int] = {}
+    by_interest: dict[str, int] = {}
+    by_captured: dict[str, int] = {}
+    by_assigned: dict[str, int] = {}
+    by_capture_method: dict[str, int] = {}
+    for lead, interaction in pairs:
+        assignee = db.get(User, interaction.assigned_to) if interaction.assigned_to else None
+        notes = db.scalars(select(LeadNote.note).where(LeadNote.lead_id == lead.id)).all()
+        leads_sheet.append([_safe_cell(value) for value in [
+            lead.lead_code, interaction.created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            lead.full_name, lead.company, lead.job_title, lead.email, lead.phone, lead.website or "",
+            ", ".join(interaction.interest), interaction.other_interest_details or "", interaction.intent,
+            interaction.other_intent_details or "", interaction.requirement_message or "",
+            interaction.capture_method, interaction.source, interaction.captured_by or "",
+            assignee.full_name if assignee else "", interaction.status, " | ".join(notes),
+        ]])
+        by_status[interaction.status] = by_status.get(interaction.status, 0) + 1
+        for item in interaction.interest:
+            by_interest[item] = by_interest.get(item, 0) + 1
+        captured = interaction.captured_by or "Unattributed"
+        by_captured[captured] = by_captured.get(captured, 0) + 1
+        assigned = assignee.full_name if assignee else "Unassigned"
+        by_assigned[assigned] = by_assigned.get(assigned, 0) + 1
+        by_capture_method[interaction.capture_method] = by_capture_method.get(interaction.capture_method, 0) + 1
+    _style_sheet(leads_sheet, [20, 25, 25, 26, 23, 32, 20, 28, 28, 30, 36, 30, 42, 18, 22, 20, 22, 18, 22, 48])
+
+    summary = workbook.create_sheet("Summary")
+    summary.append(["Measure", "Value"])
+    summary.append(["Total Leads", len(pairs)])
+    for title, values in [("Leads by Status", by_status), ("Leads by Interest", by_interest), ("Leads by Captured By", by_captured), ("Leads by Assigned To", by_assigned), ("Leads by Capture Method", by_capture_method)]:
+        summary.append([title, ""])
+        summary.cell(summary.max_row, 1).font = Font(bold=True)
+        for key, count in sorted(values.items()):
+            summary.append([_safe_cell(key), count])
+    _style_sheet(summary, [34, 24])
+
+    event_name = event or "All Events"
+    metadata = workbook.create_sheet("Export Metadata")
+    metadata.append(["Field", "Value"])
+    metadata.append(["Generated At", datetime.now(timezone.utc).isoformat()])
+    metadata.append(["Generated By", user.email])
+    metadata.append(["Event", event_name])
+    metadata.append(["Filters", json.dumps({"search": search, "status": status, "interest": interest, "intent": intent, "captured_by": captured_by, "assigned_to": assigned_to, "capture_method": capture_method, "date_from": str(date_from) if date_from else None, "date_to": str(date_to) if date_to else None}, sort_keys=True)])
+    metadata.append(["Total Rows", len(pairs)])
+    _style_sheet(metadata, [24, 90])
+
+    db.add(AuditLog(user_id=user.id, action="lead_exported", entity_type="lead", entity_id="filtered", metadata_json={"rows": len(pairs), "event": event}))
+    db.commit()
+    stream = io.BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+    safe_event = re.sub(r"[^A-Za-z0-9]+", "_", event_name).strip("_")
+    filename = f"LatentSig_{safe_event}_Leads_{date.today().isoformat()}.xlsx"
+    return StreamingResponse(stream, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "private, no-store"})

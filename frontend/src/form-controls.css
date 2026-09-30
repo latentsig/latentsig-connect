@@ -1,0 +1,108 @@
+.field .PhoneInput {
+  display: flex;
+  align-items: center;
+  min-height: 50px;
+  width: 100%;
+  border: 1px solid #dfe3eb;
+  border-radius: 10px;
+  background: #fff;
+  transition: border-color .15s, box-shadow .15s;
+}
+
+.field .PhoneInput:focus-within {
+  border-color: #9989e2;
+  box-shadow: 0 0 0 3px #eeeaff;
+}
+
+.field .PhoneInput:has(.PhoneInputInput[aria-invalid="true"]) {
+  border-color: #dc7373;
+}
+
+.field .PhoneInputCountry {
+  margin: 0 0 0 12px;
+  min-height: 44px;
+  gap: 7px;
+}
+
+.field .PhoneInputCountrySelect {
+  min-height: 44px;
+  min-width: 38px;
+  cursor: pointer;
+}
+
+.field .PhoneInputCountryIcon {
+  width: 22px;
+  height: 16px;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px #e2e4ea;
+}
+
+.field .PhoneInputCountrySelectArrow {
+  width: 6px;
+  height: 6px;
+  border-color: #81899a;
+  border-width: 0 1px 1px 0;
+}
+
+.field .PhoneInputInput {
+  min-width: 0;
+  height: 48px;
+  padding: 0 13px 0 9px;
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+  background: transparent;
+  color: #202944;
+  font: inherit;
+}
+
+.field .PhoneInputInput:focus {
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+}
+
+.email-kind {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.email-kind-label,
+.field-hint {
+  color: #8b92a2;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.field-hint {
+  line-height: 1.45;
+}
+
+.email-kind label {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  border: 1px solid #e1e4ec;
+  border-radius: 8px;
+  background: #fff;
+  color: #606980;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.email-kind input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #6957cd;
+}
+
+.email-kind label:has(input:checked) {
+  border-color: #a99be6;
+  background: #f2efff;
+  color: #5947bd;
+}

@@ -1,0 +1,17 @@
+groups:
+  - name: latentsig
+    rules:
+      - alert: LatentSigApiUnavailable
+        expr: up{job="latentsig-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: LatentSig API is unavailable
+      - alert: LatentSigHighServerErrorRate
+        expr: sum(rate(latentsig_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(latentsig_http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: LatentSig API 5xx error rate exceeds 5%
