@@ -41,25 +41,18 @@ Local Compose uses development settings. Its allowlisted email-only admin sign-i
 
 - Python 3.11 or later
 - Node.js 20.19+ or 22.12+ and npm
-- PowerShell on Windows, or a POSIX shell on macOS/Linux
+- PowerShell 7 or later (`pwsh`) on Windows, macOS, or Linux
 - An OpenRouter API key only if you want to use hosted business-card extraction
 
 ### 1. Set up and start the backend
 
-From the repository root in PowerShell:
+From the repository root, run this one-line command in PowerShell 7 on Windows, macOS, or Linux:
 
 ```powershell
-cd backend
-Copy-Item .env.example .env
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-python -m alembic upgrade head
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+pwsh -NoProfile -File ./scripts/Start-Backend.ps1
 ```
 
-On macOS/Linux, replace the environment activation command with `source .venv/bin/activate`; use `python3 -m venv .venv` if `python` is not Python 3.11+. Keep this terminal running. The default local database is `backend/latentsig.db`. Startup creates the default event when it is missing. Alembic manages schema upgrades.
+The script creates `backend/.env` if it is missing, detects Python 3.11 or later, creates the virtual environment, installs backend requirements, applies Alembic migrations, and starts FastAPI. Keep this terminal running. The default local database is `backend/latentsig.db`; startup creates the default event when it is missing. The script supports PowerShell 7 across Windows, macOS, and Linux, so the setup instructions stay the same on each system.
 
 To enable card scanning, add your key to the ignored `backend/.env` file:
 
@@ -77,11 +70,13 @@ Open a second terminal at the repository root:
 ```powershell
 cd frontend
 Copy-Item .env.example .env.local
-npm.cmd install
-npm.cmd run dev
+$npm = if ($IsWindows) { 'npm.cmd' } else { 'npm' }
+& $npm install
+if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }
+& $npm run dev
 ```
 
-On macOS/Linux, use `npm install` and `npm run dev`. Keep this terminal running and open:
+Keep this terminal running and open:
 
 - Public capture: [http://localhost:5173/connect](http://localhost:5173/connect)
 - Manual form: [http://localhost:5173/connect/manual](http://localhost:5173/connect/manual)
@@ -141,28 +136,37 @@ Copy `frontend/.env.example` to `frontend/.env.local` for browser configuration.
 
 ```powershell
 cd frontend
-npm.cmd run lint
-npm.cmd run test
-npm.cmd run build
+$npm = if ($IsWindows) { 'npm.cmd' } else { 'npm' }
+& $npm run lint
+if ($LASTEXITCODE -ne 0) { throw 'Frontend lint failed.' }
+& $npm run test
+if ($LASTEXITCODE -ne 0) { throw 'Frontend unit tests failed.' }
+& $npm run build
 ```
 
 Run browser end-to-end tests with the backend running:
 
 ```powershell
-npm.cmd run test:e2e
+$npm = if ($IsWindows) { 'npm.cmd' } else { 'npm' }
+& $npm run test:e2e
 ```
 
-Install Playwright Chromium once if needed with `npx.cmd playwright install chromium`. E2E tests use synthetic contact data and Chromium device emulation; they do not replace testing on physical iOS Safari or Android devices.
+Install Playwright Chromium once if needed with `$npx = if ($IsWindows) { 'npx.cmd' } else { 'npx' }; & $npx playwright install chromium`. E2E tests use synthetic contact data and Chromium device emulation; they do not replace testing on physical iOS Safari or Android devices.
 
 ### Backend
 
 ```powershell
 cd backend
-python -m pip install -r requirements-dev.txt
-ruff check app tests
-pytest -q tests/test_api.py tests/test_ocr_parser.py tests/test_passwords.py tests/test_vision.py
-python -m compileall -q app tests
-python -m alembic upgrade head
+$python = if ($IsWindows) { '.\.venv\Scripts\python.exe' } else { './.venv/bin/python' }
+& $python -m pip install -r requirements-dev.txt
+if ($LASTEXITCODE -ne 0) { throw 'Backend test dependencies failed to install.' }
+& $python -m ruff check app tests
+if ($LASTEXITCODE -ne 0) { throw 'Backend lint failed.' }
+& $python -m pytest -q tests/test_api.py tests/test_ocr_parser.py tests/test_passwords.py tests/test_vision.py
+if ($LASTEXITCODE -ne 0) { throw 'Backend tests failed.' }
+& $python -m compileall -q app tests
+if ($LASTEXITCODE -ne 0) { throw 'Backend compile check failed.' }
+& $python -m alembic upgrade head
 ```
 
 CI also checks production Docker Compose configuration, builds and validates the Nginx configurations, and checks certificate script syntax. To reproduce database-backed CI tests locally, start PostgreSQL and Redis and set `DATABASE_URL` and `REDIS_URL` before running pytest.
