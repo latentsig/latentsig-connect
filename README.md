@@ -1,44 +1,52 @@
 # LatentSig Connect
 
-LatentSig Connect captures event and meeting leads through a mobile-first QR flow. Visitors can enter details manually or scan a business card with local PaddleOCR, review the extracted fields, choose interests and intent, and submit. The local setup stores leads in SQLite; PostgreSQL is supported for a shared deployment. Contacts are deduplicated by normalized email and phone, while each event encounter remains a separate interaction.
+LatentSig Connect is a mobile-first event lead capture and team follow-up application. Visitors open a QR link, enter their details manually or scan a business card, review the information, and submit an enquiry. The team can review, assign, annotate, and export leads from the admin workspace.
 
-## Review the running app
+The application includes a React and TypeScript frontend, a FastAPI backend, SQLite for local development, and PostgreSQL and Redis for shared or production deployments.
 
-After starting the frontend and backend below, use these review URLs:
+## Features
 
-- Public landing and capture choices: **http://localhost:5173/connect**
-- Direct manual capture form: **http://localhost:5173/connect/manual**
-- Admin login: **http://localhost:5173/admin/login**
-- API readiness: **http://localhost:8000/health/ready**
-- API interactive docs: **http://localhost:8000/docs**
+- QR-based capture links with event and campaign attribution.
+- Responsive manual entry and optional business-card scanning with editable AI-extracted fields.
+- Explicit visitor consent before card images are sent through the backend to OpenRouter and its selected vision model provider.
+- Admin login, lead search and filters, assignments, notes, event management, and Excel exports.
+- Private card image storage, lead and event history, input validation, rate limiting, and idempotent lead submission.
+- Optional Google Sheets sync through a retryable background worker.
+- Installable progressive web app; only the static app shell is cached.
+- Docker Compose deployment profile with Nginx, HTTPS certificate scripts, database backups, and Prometheus monitoring.
 
-The API base URL is `http://localhost:8000`.
+## Quick start with Docker
 
-These are **three URLs, not three separate processes**. The frontend server on port `5173` serves both the public capture form and admin workspace. The backend server on port `8000` serves the API, health checks, and API docs. The local setup below currently starts the backend and frontend in **two separate terminals**; opening the URLs does not start the servers.
+Docker Compose starts the app with PostgreSQL and Redis. From the repository root:
 
-## Product flows
+```powershell
+docker compose up --build
+```
 
-- Public pages: `/connect`, `/connect/manual`, `/connect/card`, `/connect/card/review`, `/connect/thank-you`.
-- Admin pages: `/admin/login`, `/admin/dashboard`, `/admin/leads`, `/admin/leads/:id`, `/admin/team`, `/admin/settings`.
-- QR attribution accepts `ref`, `event`, `utm_source`, `utm_medium`, and `utm_campaign` query parameters and carries them through the visitor flow.
-- Manual and OCR review forms classify common consumer email providers as Personal and other domains as Work. Visitors can change this selection.
-- The phone control lets visitors choose a country, adds its calling code, requests a telephone keyboard, filters alphabetic characters, validates the international number, and submits E.164 format. OCR uses an explicit international calling code when present and otherwise uses `DEFAULT_PHONE_REGION`.
-- OCR accepts a required front image and an optional back image (JPG, PNG, or WEBP; 10 MB each). It reads both locally in one scan, and the visitor reviews and edits every result before submitting. Interest, intent, and requirements are always chosen by the visitor. OCR uses local PaddleOCR, not a hosted model.
-- Admin functions include lead search and event/date/interest/intent/status/source/assignment filters, mobile cards and desktop table, detail/history, assignment, notes, private front/back card viewing, team role updates, event creation/activation, summary metrics, and three-sheet Excel export. Sales users see leads assigned to them plus unassigned intake leads; they can view unassigned leads but must wait for a manager to assign them before changing status or adding notes.
-- Local admins enter one of five explicitly allowlisted emails. This convenience sign-in is available only when `APP_ENV=development`; it does not verify mailbox ownership and must not be exposed as a shared or production login.
-- The configured SQL database is the source of truth. Google Sheets writes run in a retryable background integration worker and do not block lead capture.
+When the services are healthy, open:
 
-## Requirements
+- Public capture: [http://localhost:8080/connect](http://localhost:8080/connect)
+- Admin login: [http://localhost:8080/admin/login](http://localhost:8080/admin/login)
+- API readiness: [http://localhost:8080/health/ready](http://localhost:8080/health/ready)
+- API documentation: [http://localhost:8080/docs](http://localhost:8080/docs)
+- Prometheus: [http://localhost:9090](http://localhost:9090)
 
-- Node.js 20.19+ or 22.12+, npm
-- Python 3.11+
-- A CPU that can run PaddlePaddle for local OCR
+Stop the stack with `Ctrl+C`, or run `docker compose down`. Persistent database, uploaded cards, backups, and monitoring data are stored in named Docker volumes. `docker compose down -v` also deletes those volumes and their data.
 
-## Local setup (PowerShell)
+Local Compose uses development settings. Its allowlisted email-only admin sign-in is for local review only; it does not verify mailbox ownership and must not be exposed as production authentication. Set `OPENROUTER_API_KEY` in a root `.env` file to enable card scanning in Compose. Manual entry works without an AI key.
 
-### 1. Backend
+## Local development without Docker
 
-In a terminal from the repository root:
+### Requirements
+
+- Python 3.11 or later
+- Node.js 20.19+ or 22.12+ and npm
+- PowerShell on Windows, or a POSIX shell on macOS/Linux
+- An OpenRouter API key only if you want to use hosted business-card extraction
+
+### 1. Set up and start the backend
+
+From the repository root in PowerShell:
 
 ```powershell
 cd backend
@@ -48,17 +56,23 @@ py -3.11 -m venv .venv
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 python -m alembic upgrade head
-python -m app.services.ocr.warmup
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-The default local database is `backend/latentsig.db`. Startup creates the default event (`bts-2026`) when it is missing. Alembic applies schema changes; do not use `create_all` as a deployment migration strategy. `.env` is read relative to the backend working directory.
+On macOS/Linux, replace the environment activation command with `source .venv/bin/activate`; use `python3 -m venv .venv` if `python` is not Python 3.11+. Keep this terminal running. The default local database is `backend/latentsig.db`. Startup creates the default event when it is missing. Alembic manages schema upgrades.
 
-The first package installation and OCR model warm-up need internet access. Paddle model files are cached under `backend/.cache/paddlex`. Once dependencies and models are cached, recognition runs on the API host without sending images to an external OCR service. A disconnected event machine must be provisioned and warmed before it goes offline.
+To enable card scanning, add your key to the ignored `backend/.env` file:
 
-### 2. Frontend
+```dotenv
+OPENROUTER_API_KEY=your-key
+OCR_ENABLED=true
+```
 
-In a second terminal from the repository root:
+The backend sends an opted-in card image to OpenRouter and the configured model provider. Do not enable hosted scanning for images that must remain on-premises. If the provider is not configured or unavailable, visitors can enter details manually.
+
+### 2. Set up and start the frontend
+
+Open a second terminal at the repository root:
 
 ```powershell
 cd frontend
@@ -67,174 +81,137 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Open **http://localhost:5173/connect**. Set `VITE_API_BASE_URL=http://localhost:8000` in `frontend/.env.local` if the API is elsewhere. Public Vite variables must never contain server credentials.
+On macOS/Linux, use `npm install` and `npm run dev`. Keep this terminal running and open:
 
-### Test on a phone over Wi-Fi
+- Public capture: [http://localhost:5173/connect](http://localhost:5173/connect)
+- Manual form: [http://localhost:5173/connect/manual](http://localhost:5173/connect/manual)
+- Card scan: [http://localhost:5173/connect/card](http://localhost:5173/connect/card)
+- Admin login: [http://localhost:5173/admin/login](http://localhost:5173/admin/login)
+- API readiness: [http://localhost:8000/health/ready](http://localhost:8000/health/ready)
+- API documentation: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-With the local backend and frontend stopped, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Start-Mobile-Preview.ps1` from the repository root. This one-command policy override does not change the machine’s execution policy. The script binds the app to this computer’s Wi-Fi address, points the event QR code and browser API requests to that address, and allows that page as an API origin. Connect the phone to the same Wi-Fi, open the printed admin URL on the computer, go to Settings, and scan the event QR code with the phone. On `/connect/card`, **Take Photo** opens the phone’s rear camera; **Upload Image** opens the photo library. If Windows asks, allow private-network access for Python and Node. If the phone cannot connect, an administrator must allow inbound TCP ports 5173 and 8000 from the local subnet in Windows Firewall. This local preview is for a trusted LAN and does not provide public access or production HTTPS.
+The frontend development server proxies `/api` requests to `127.0.0.1:8000`. Leave `VITE_API_BASE_URL` blank for this same-origin proxy, which also lets local admin session cookies work correctly. `VITE_` variables are public browser configuration; never put API keys, passwords, or other server credentials in them.
 
-### 3. Local admin review
+### Open the local app on a phone
 
-Open `http://localhost:5173/admin/login` and enter one of the five addresses in `ADMIN_EMAIL_ALLOWLIST`. The email-only shortcut works only in local development and does not prove who owns that mailbox; use it only on this trusted local machine. Other email addresses are rejected. Initial admins are `bharat@latentsig.com` and `bhoomika@latentsig.com`. Grant another team member admin access with `python -m app.cli grant-admin name@latentsig.com`.
+`localhost` on a phone points to the phone itself. To preview on a phone connected to the same Wi-Fi network, stop the regular frontend and backend processes, then run this from the repository root in PowerShell:
 
-No Docker, PostgreSQL, or Redis service is needed for the local review. The local defaults use SQLite and an in-process development rate limiter. PostgreSQL and Redis remain optional deployment choices; production mode requires them.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Start-Mobile-Preview.ps1
+```
 
-## Team walkthrough
+Open the printed admin URL on your computer, sign in, and scan an event QR code with the phone. If Windows Firewall prompts, allow Python and Node on the private network. This is a local network preview, not a public deployment and not a substitute for production HTTPS.
 
-1. Visit `/connect` on a phone-sized browser and choose manual entry or business-card scanning.
-2. For manual entry, choose the email type if needed, select a phone country, complete the required fields, choose one or more interests and an intent, then submit. Selecting **Other** under interests or discussion opens its own required five-word explanation. The optional “How did you feel? What could we improve?” comment appears directly below those Other answers. These answers are stored separately and shown in admin lead details and exports.
-3. For OCR, take or upload the front of the card, then optionally add the back. Each side can be a JPG, PNG, or WEBP image up to 10 MB. The local OCR reads both together. Check every populated field, correct anything inaccurate, then choose interests and intent before submitting. OCR never submits automatically.
-4. Confirm the thank-you screen appears. API writes return a lead code and interaction ID. Repeat the same email or phone at another event to add an interaction to the existing lead.
-5. Open `/admin/login`, then review the dashboard, filter/search leads, open a lead, change its status, assign a team member, and add a note.
-6. Export an Excel workbook from the Leads page. The workbook contains Leads, Summary, and Export Metadata sheets.
-7. Try a QR URL such as `/connect?event=bts-2026&ref=booth&utm_source=bts&utm_medium=qr&utm_campaign=bts-2026` and check the resulting interaction in admin.
+## Admin access
 
-Use synthetic contact information during development. Local leads, card images, and test records live on the machine and are not automatically removed.
+For local development, open `/admin/login` and enter an address in `ADMIN_EMAIL_ALLOWLIST` from `backend/.env`. The development email sign-in is an allowlist check only; it does not authenticate control of the mailbox. Do not use it for a shared or production deployment.
 
-## Tests and checks
+Production uses password accounts. From the `backend` directory locally, set a password interactively and grant the initial administrator role as needed. On the VPS, prefix these commands with `docker compose exec backend` as shown in [DEPLOYMENT.md](DEPLOYMENT.md):
 
-For Docker Compose and production configuration, see [DEPLOYMENT.md](DEPLOYMENT.md). CI runs frontend static checks, unit tests and build, plus backend lint, API tests and Alembic checks.
+```powershell
+python -m app.cli set-password bhoomika@latentsig.com
+python -m app.cli grant-admin bhoomika@latentsig.com
+```
 
-### Current responsive and E2E verification
+The password prompt does not echo the password. Production accounts must also be in `ADMIN_EMAIL_ALLOWLIST`.
 
-Last local verification: **September 30, 2026**. The complete Playwright suite passed **10/10**, backend API tests passed **15/15**, frontend unit tests passed **7/7**, and frontend lint and production build passed.
+## Configuration
 
-The responsive E2E sweep checked the public capture form and admin leads page at viewport widths of **320, 390, 430, 768, 1024, 1366, and 1920 CSS pixels**. It verified that neither page creates document-level horizontal overflow at those sizes. It also submitted a lead and opened admin review in these mobile profiles:
+Copy `backend/.env.example` to `backend/.env` for local backend settings. Common server-side variables include:
 
-- **Pixel 10** using Playwright's Pixel 10 profile.
-- **iPhone 17** using Playwright's iPhone 17 viewport profile.
-- **iPhone 18-size** using the iPhone 17 viewport as an approximation because Playwright does not provide an iPhone 18 profile in this project.
+| Variable | Purpose |
+| --- | --- |
+| `APP_ENV`, `APP_SECRET` | Runtime mode and signed-session key. Production needs a unique secret of at least 32 characters. |
+| `DATABASE_URL` | SQLite locally or PostgreSQL for shared/production use. |
+| `FRONTEND_URL`, `FRONTEND_URLS` | Public frontend origin and allowed browser origins. |
+| `ADMIN_EMAIL_ALLOWLIST`, `INITIAL_ADMIN_EMAILS` | Allowed team accounts and initial administrator accounts. |
+| `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OCR_ENABLED` | Backend-only business-card extraction configuration. |
+| `REDIS_URL` | Distributed rate limiting; required in production. |
+| `PRIVATE_STORAGE_DIR`, `STORAGE_PROVIDER` | Local private file storage or S3-compatible storage. |
+| `BUSINESS_CARD_RETENTION_DAYS` | Card image retention period used by the cleanup command. |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_EMAIL` and `GOOGLE_PRIVATE_KEY` | Optional Google Sheets service account credentials. |
+| `GOOGLE_SHEET_ID`, `GOOGLE_SHEET_TAB` | Optional destination spreadsheet and tab. |
+| `WHATSAPP_NUMBER` | Optional WhatsApp destination in international digits-only format. |
 
-All browser E2E runs use the installed **Chromium** engine. The iPhone profiles therefore test mobile layout and touch emulation in Chromium; they do not test iOS Safari/WebKit. These checks are emulations, not tests on physical phones. Camera capture is tested through the browser file-capture input and review flow, not through a connected phone camera sensor. Test leads are written to the configured local database and are retained until manually removed.
+Copy `frontend/.env.example` to `frontend/.env.local` for browser configuration. The production Docker build sets `VITE_PUBLIC_SITE_URL` from `FRONTEND_URL`; set it to the approved public HTTPS origin before building so event QR codes open on phones.
 
-### Run frontend checks
+## Tests and quality checks
 
-From PowerShell, the `.cmd` suffix avoids PowerShell execution-policy blocks on `npm.ps1`:
+### Frontend
 
 ```powershell
 cd frontend
 npm.cmd run lint
 npm.cmd run test
 npm.cmd run build
+```
+
+Run browser end-to-end tests with the backend running:
+
+```powershell
 npm.cmd run test:e2e
 ```
 
-Playwright starts the Vite development server when needed and reuses an existing server on port 5173. Install Chromium once if it is missing:
+Install Playwright Chromium once if needed with `npx.cmd playwright install chromium`. E2E tests use synthetic contact data and Chromium device emulation; they do not replace testing on physical iOS Safari or Android devices.
 
-```powershell
-cd frontend
-npx.cmd playwright install chromium
-```
-
-### Run backend checks
+### Backend
 
 ```powershell
 cd backend
-python -m unittest discover -s tests -v
+python -m pip install -r requirements-dev.txt
+ruff check app tests
+pytest -q tests/test_api.py tests/test_ocr_parser.py tests/test_passwords.py tests/test_vision.py
 python -m compileall -q app tests
 python -m alembic upgrade head
 ```
 
-The browser tests submit synthetic leads to the configured local API and leave those test leads in the local database. A manual OCR smoke check can upload one or two local images as repeated `files` fields to `POST /api/v1/ocr/business-card`; the response contains per-side opaque short-lived review tokens and extracted candidates. OCR works best with a clear, well-lit card image; the visitor must verify its results.
-
-## Configuration
-
-Copy `backend/.env.example` to `backend/.env`; keep it server-side. Important values:
-
-| Variable | Purpose |
-| --- | --- |
-| `APP_ENV`, `APP_SECRET` | Environment and signed-session key. Use a unique 32+ character secret in production. |
-| `DATABASE_URL` | SQLite locally or managed PostgreSQL. |
-| `FRONTEND_URL`, `FRONTEND_URLS` | Frontend URL and CORS allowlist. |
-| `DEFAULT_EVENT_SLUG` | Event used when a QR link omits `event`. |
-| `DEFAULT_PHONE_REGION` | Fallback region for phone values with no international calling code. |
-| `ADMIN_EMAIL_ALLOWLIST`, `INITIAL_ADMIN_EMAILS` | Local team email list and initial admin role assignment. Email-only access works only in development. |
-| `REDIS_URL` | Distributed rate-limit storage; required in production. |
-| `LEAD_RATE_LIMIT_COUNT`, `LEAD_RATE_LIMIT_WINDOW_SECONDS` | Public lead submission limits. |
-| `OCR_RATE_LIMIT_COUNT`, `OCR_RATE_LIMIT_WINDOW_SECONDS` | OCR request limits. |
-| `AUTH_RATE_LIMIT_COUNT`, `AUTH_RATE_LIMIT_WINDOW_SECONDS` | Admin login attempt limit. |
-| `MAX_UPLOAD_BYTES` | Business-card upload maximum; defaults to 10 MiB. |
-| `PRIVATE_STORAGE_DIR`, `STORAGE_PROVIDER` | Private local storage or S3-compatible storage. |
-| `STORAGE_BUCKET`, `STORAGE_ENDPOINT`, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY` | S3-compatible storage credentials and target. |
-| `BUSINESS_CARD_RETENTION_DAYS` | Retention period used by the manual cleanup command; schedule it with Windows Task Scheduler or cron if recurring cleanup is wanted. |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_EMAIL` + `GOOGLE_PRIVATE_KEY`, `GOOGLE_SHEET_ID`, `GOOGLE_SHEET_TAB` | Server-side Google Sheets integration. Share the sheet with the service account. |
-| `WHATSAPP_NUMBER` | LatentSig WhatsApp destination, digits only with country code. |
-
-Frontend values in `frontend/.env.local`:
-
-```dotenv
-VITE_API_BASE_URL=http://localhost:8000
-VITE_APP_NAME=LatentSig Connect
-VITE_PUBLIC_SITE_URL=http://localhost:5173
-VITE_WHATSAPP_NUMBER=
-```
-
-`VITE_WHATSAPP_NUMBER` is optional; the visitor explicitly clicks the WhatsApp link and sends the prefilled message. Never place `DATABASE_URL`, Google service-account keys, or storage credentials in a `VITE_` variable.
+CI also checks production Docker Compose configuration, builds and validates the Nginx configurations, and checks certificate script syntax. To reproduce database-backed CI tests locally, start PostgreSQL and Redis and set `DATABASE_URL` and `REDIS_URL` before running pytest.
 
 ## API overview
 
-| Method | Endpoint | Use |
+The interactive API documentation is available at `/docs` when the backend is running. Main endpoints include:
+
+| Method | Endpoint | Description |
 | --- | --- | --- |
-| `GET` | `/health` | Process health check. |
-| `POST` | `/api/v1/leads` | Validate, deduplicate, and persist a lead and interaction. |
-| `POST` | `/api/v1/ocr/business-card` | Local OCR of one front image plus an optional back image; returns candidates and short-lived per-side tokens. Send repeated `files` multipart fields in front-then-back order. |
-| `POST` | `/api/v1/auth/email-login` | Local-only sign-in for an allowlisted email. |
-| `GET` | `/api/v1/auth/me` | Return the signed-in admin profile. |
-| `POST` | `/api/v1/auth/logout` | End the admin session. |
-| `POST` | `/api/v1/auth/dev-login` | Allowlisted local-only login when `APP_ENV=development`. |
-| `GET` | `/api/v1/admin/dashboard` | Lead totals and breakdowns. |
-| `GET` | `/api/v1/admin/leads` | Search, filter, and page leads. |
-| `GET/PATCH/DELETE` | `/api/v1/admin/leads/{id}` | View and manage lead records (delete is ADMIN-only). |
-| `POST` | `/api/v1/admin/leads/{id}/notes` | Add a private internal note. |
-| `GET` | `/api/v1/admin/leads/{id}/business-card` | Authenticated private card image; `side=front` by default or `side=back`. |
-| `GET/PATCH` | `/api/v1/admin/team`, `/api/v1/admin/team/{id}` | List and update team members. |
-| `GET/POST/PATCH` | `/api/v1/admin/events` | List/create events and update event details or activation. |
-| `GET` | `/api/v1/admin/settings` | Show integration configuration state, never secrets. |
-| `GET` | `/api/v1/admin/exports/leads.xlsx` | Admin/manager Excel workbook with supported query filters. |
+| `GET` | `/health/ready` | Readiness check. |
+| `POST` | `/api/v1/leads` | Validate and save a lead and event interaction. |
+| `POST` | `/api/v1/ocr/business-card` | Extract details from a required front image and optional back image. |
+| `GET` | `/api/v1/admin/dashboard` | Admin dashboard summary. |
+| `GET` | `/api/v1/admin/leads` | Search and filter leads. |
+| `GET/PATCH/DELETE` | `/api/v1/admin/leads/{id}` | View or manage a lead, subject to role permissions. |
+| `GET/POST/PATCH` | `/api/v1/admin/events` | List and manage capture events. |
+| `GET` | `/api/v1/admin/settings` | Integration status without exposing credentials. |
+| `GET` | `/api/v1/admin/exports/leads.xlsx` | Download an Excel workbook. |
 
-Lead submissions require `full_name`, `company`, `job_title`, `email`, `phone`, at least one `interest`, and `intent`. Optional visitor fields include `website` and `requirement_message`. Business-card submissions include the front `business_card_token` and, when uploaded, `business_card_back_token`; the server validates each token and stores both images privately on the same card record and interaction.
+## Data, consent, and privacy
 
-## Data and privacy
+- Manual entry does not upload a business-card image. Card scanning requires explicit AI-processing consent before the backend sends images to OpenRouter and the selected model provider.
+- Images are validated, normalized, and stored in private local or configured S3-compatible storage. Admin access to retained card images is authenticated; images are not served publicly.
+- The SQL database is the source of truth. Leads are deduplicated by normalized contact information; event encounters are stored as separate interactions.
+- Public submission, OCR, and authentication endpoints use configurable rate limits. Local development can use in-process limits; production uses Redis.
+- Admin sessions use signed HTTP-only cookies. Production cookies are secure and admin authentication uses allowlisted password accounts.
+- Update `CONSENT_NOTICE_VERSION` when the approved data-processing notice changes.
 
-- The configured SQL database is the source of truth. `leads` hold deduplicated contacts; `interactions` retain each event/source/intent/status encounter. Tables also cover users, events, business cards, notes, audit logs, and integration jobs.
-- Email is normalized to lowercase. Phone values are validated with `phonenumbers`, stored in E.164 form, and associated with an ISO country code when identifiable.
-- Front and optional back images are validated by declared MIME type and actual bytes, decoded with EXIF orientation correction, resized when large, and staged in private storage. OCR runs locally in the backend. Per-side review tokens expire after 30 minutes; retained card images are never served publicly and admin image retrieval is authenticated.
-- Public form and OCR endpoints use configurable rate limits. Redis is used when configured; local development can fall back to process memory.
-- Admin sessions are signed and HttpOnly, local email-only sign-in is disabled outside development, CORS uses an explicit origin allowlist, and API role checks are enforced.
-- The email-only sign-in is intentionally local-development-only and is not an identity check. Do not expose it on a shared or production deployment.
+To run one-off expired card cleanup, use `python -m app.services.storage.retention` from the `backend` directory. For production, schedule retention cleanup and keep backups outside the VPS. Google Sheets syncing is optional; its worker retries transient failures without blocking lead submission.
 
-For a one-off local retention cleanup, run `cd backend; python -m app.services.storage.retention`. It deletes expired image files while retaining their database and audit records. Recurring cleanup is optional and can be scheduled using the team OS scheduler.
+## Deployment
 
-## Google Sheets and Excel
+Production uses Docker Compose with Nginx, HTTPS, PostgreSQL, Redis, FastAPI, the React frontend, an integration worker, database backups, and Prometheus. Deployment requires a provisioned VPS, approved domain and DNS, securely configured secrets, and production admin passwords. **This repository setup does not deploy the application or change DNS.**
 
-When `GOOGLE_SHEET_ID` and server-side service-account credentials are configured, each committed interaction creates a pending integration job. Run a worker in a separate backend process:
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the step-by-step VPS, domain, certificate, startup, password, and renewal instructions. The planned public origin is `https://connect.latentsig.com`; it becomes reachable only after deployment and DNS/HTTPS setup.
 
-```powershell
-cd backend
-.\.venv\Scripts\Activate.ps1
-python -m app.services.integrations.worker
-```
-
-The worker retries failures with increasing delay and marks exhausted jobs failed. A Sheets outage does not undo a lead submission. Excel exports are generated on the backend with openpyxl, include summary/metadata sheets, honor supported event/date/status/interest/capture/assignment filters, and sanitize formula-leading cell values.
-
-## Deployment notes
-
-Local review uses SQLite and needs no containers. A PostgreSQL/Redis container stack is available through Docker Compose; see [DEPLOYMENT.md](DEPLOYMENT.md). The local email-only sign-in is disabled outside development; choose a verified identity provider before exposing admin access to a shared deployment.
-
-## Repository map
+## Repository layout
 
 ```text
-frontend/src/App.tsx                     Public capture flow and routes
-frontend/src/Admin.tsx                   Admin pages and lead workflows
-frontend/src/styles.css                  Public responsive design system
-frontend/src/admin.css                   Admin desktop/mobile layouts
-frontend/e2e/public-flow.spec.ts          Chromium end-to-end flows
-backend/app/api/v1/routes/                Public, auth, admin, OCR, export APIs
-backend/app/services/ocr/                 Local preprocessing, PaddleOCR, parser
-backend/app/services/leads/               Dedupe and capture workflow
-backend/app/services/storage/             Private local/S3 card storage
-backend/app/services/integrations/        Google Sheets worker
-backend/app/db/models.py                  SQLAlchemy schema
-backend/alembic/                          Database migrations
-LatentSig_Event_Lead_Capture_Full_Plan.md Product source plan
+frontend/src/                 React public capture and admin application
+frontend/e2e/                 Playwright browser tests
+backend/app/api/              FastAPI endpoints
+backend/app/services/         Lead, vision, storage, and integration services
+backend/alembic/              Database schema migrations
+backend/tests/                Backend tests
+deploy/nginx/                 Nginx bootstrap and HTTPS configuration
+scripts/                      Local preview, production setup, backup, and TLS scripts
+docs/                         Architecture, runbooks, and implementation notes
+docker-compose.yml            Local and production service definitions
+DEPLOYMENT.md                 VPS deployment guide
 ```

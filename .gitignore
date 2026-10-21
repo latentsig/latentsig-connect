@@ -5,6 +5,7 @@ backend/.env
 .env
 .env.*
 !.env.example
+!.env.production.example
 !**/.env.example
 backend/.venv/
 backend/.cache/

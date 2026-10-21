@@ -8,6 +8,12 @@ import './upload.css'
 import './form-controls.css'
 import './admin.css'
 
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/service-worker.js').catch(() => undefined)
+  })
+}
+
 const queryClient = new QueryClient()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

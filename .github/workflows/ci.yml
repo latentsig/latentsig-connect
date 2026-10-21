@@ -5,6 +5,29 @@ on:
   pull_request:
 
 jobs:
+  deployment-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate production Compose profiles
+        run: docker compose --profile production --profile certificates config --quiet
+      - name: Check deployment shell syntax
+        run: sh -n scripts/issue-tls-certificate.sh scripts/renew-tls-certificate.sh deploy/nginx/select-config.sh
+      - name: Build and validate Nginx bootstrap configuration
+        run: |
+          docker build -t latentsig-nginx-config ./deploy/nginx
+          docker run --rm -e PUBLIC_DOMAIN=connect.latentsig.com latentsig-nginx-config nginx -t
+      - name: Build and validate Nginx TLS configuration
+        run: |
+          mkdir -p "$RUNNER_TEMP/certificates/live/connect.latentsig.com"
+          openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
+            -keyout "$RUNNER_TEMP/certificates/live/connect.latentsig.com/privkey.pem" \
+            -out "$RUNNER_TEMP/certificates/live/connect.latentsig.com/fullchain.pem" \
+            -subj "/CN=connect.latentsig.com"
+          docker run --rm -e PUBLIC_DOMAIN=connect.latentsig.com \
+            -v "$RUNNER_TEMP/certificates:/etc/letsencrypt:ro" \
+            latentsig-nginx-config nginx -t
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

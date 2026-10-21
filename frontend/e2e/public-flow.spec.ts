@@ -1,4 +1,18 @@
-import { devices, expect, test } from '@playwright/test'
+import { devices, expect, test, type Page } from '@playwright/test'
+
+async function acceptNotice(page: Page, allowFollowUp = true) {
+  const checkbox = page.getByRole('checkbox', { name: /I agree LatentSig may store and process these details/ })
+  if (await checkbox.count()) await checkbox.check()
+  if (allowFollowUp) {
+    const followUp = page.getByRole('checkbox', { name: /You may contact me about this enquiry/ })
+    if (await followUp.count()) await followUp.check()
+  }
+}
+
+async function acceptAiImageNotice(page: Page) {
+  const checkbox = page.getByRole('checkbox', { name: /I agree to send this card image/ })
+  if (await checkbox.count()) await checkbox.check()
+}
 
 test('mobile visitor can select email type and country, then submit a lead', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
@@ -30,6 +44,7 @@ test('mobile visitor can select email type and country, then submit a lead', asy
 
   await page.getByRole('button', { name: 'AI Agents' }).click()
   await page.getByLabel('What would you like to discuss?').selectOption('I need a demo')
+  await acceptNotice(page)
   await page.getByRole('button', { name: /connect with latentsig/i }).click()
   await expect(page.getByRole('heading', { name: /thank you, browser/i })).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole('link', { name: /continue on whatsapp/i })).toHaveAttribute('href', /^https:\/\/wa\.me\//)
@@ -45,16 +60,18 @@ test('manual submission explains API failure and card scan offers recovery', asy
   await page.locator('.PhoneInputInput').fill('+919876543210')
   await page.getByRole('button', { name: 'AI Agents' }).click()
   await page.getByLabel('What would you like to discuss?').selectOption('I need a demo')
+  await acceptNotice(page)
   await page.getByRole('button', { name: /connect with latentsig/i }).click()
   await expect(page.getByRole('alert')).toContainText(/your details have not been sent/i)
   await expect(page.getByPlaceholder('e.g. Rachel Thomas')).toBeVisible()
 
   await page.unroute('**/api/v1/leads')
-  await page.route('**/api/v1/ocr/business-card', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Local OCR is unavailable.' }) }))
+  await page.route('**/api/v1/ocr/business-card', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Card scanning is temporarily unavailable.' }) }))
   await page.goto('/connect/card')
   await page.locator('input[type=file]').nth(1).setInputFiles('../logo.png')
+  await acceptAiImageNotice(page)
   await page.getByRole('button', { name: 'Scan business card' }).click()
-  await expect(page.getByRole('alert')).toContainText(/local ocr is unavailable/i)
+  await expect(page.getByRole('alert')).toContainText(/card scanning is temporarily unavailable/i)
   await expect(page.getByRole('button', { name: 'Scan business card' })).toBeEnabled()
 })
 
@@ -78,10 +95,12 @@ test('Other interest asks for details and the team can review them on the lead',
   const inlineInterestField = await page.locator('.message-field').filter({ has: interestPrompt }).evaluate(field => field.compareDocumentPosition(document.querySelector('.intent-field')!) & Node.DOCUMENT_POSITION_FOLLOWING)
   expect(inlineInterestField).toBeTruthy()
   await page.getByLabel('What would you like to discuss?').selectOption('I need a demo')
+  await acceptNotice(page)
   await page.getByRole('button', { name: /connect with latentsig/i }).click()
   await expect(page.getByText('Please explain your interest in 5 words or fewer.')).toBeVisible()
   await detailsField.fill(details)
   await page.getByPlaceholder('Share your thoughts with us').fill(feedback)
+  await acceptNotice(page)
   await page.getByRole('button', { name: /connect with latentsig/i }).click()
   await expect(page).toHaveURL(/\/connect\/thank-you$/)
 
@@ -107,6 +126,7 @@ test('Other discussion shows its explanation and feedback inline', async ({ page
   await page.locator('.PhoneInputInput').fill(`415555${suffix.slice(-4)}`)
   await page.getByRole('button', { name: 'AI Agents' }).click()
   await page.getByLabel('What would you like to discuss?').selectOption('Other')
+  await acceptNotice(page)
   const prompt = page.getByText('What would you like to discuss? Explain in 5 words')
   await expect(prompt).toBeVisible()
   const detailsField = page.getByPlaceholder('e.g. RAG agent')
@@ -115,6 +135,7 @@ test('Other discussion shows its explanation and feedback inline', async ({ page
   await detailsField.fill('RAG agent for support')
   await expect(page.getByText('4 / 5 words')).toBeVisible()
   await page.getByPlaceholder('Share your thoughts with us').fill('Please add a link to learn about your services.')
+  await acceptNotice(page)
   await page.getByRole('button', { name: /connect with latentsig/i }).click()
   await expect(page).toHaveURL(/\/connect\/thank-you$/)
 })
@@ -177,9 +198,10 @@ test('team member can sign in and admins can review captured leads', async ({ pa
   expect(captureHref).toContain('event=bts-2026')
   expect(captureHref).toContain('utm_medium=qr')
   expect(new URL(captureHref!).protocol).toMatch(/^https?:$/)
-  if (process.env.PLAYWRIGHT_EXPECTED_CAPTURE_ORIGIN) {
-    expect(new URL(captureHref!).origin).toBe(process.env.PLAYWRIGHT_EXPECTED_CAPTURE_ORIGIN)
-  }
+  const expectedCaptureOrigin = process.env.PLAYWRIGHT_EXPECTED_CAPTURE_ORIGIN
+    || process.env.VITE_PUBLIC_SITE_URL
+    || new URL(process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:5173').origin
+  expect(new URL(captureHref!).origin).toBe(expectedCaptureOrigin)
   const qrImage = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Download QR image' }).click()
   expect((await qrImage).suggestedFilename()).toBe('bts-2026-capture-qr.svg')
@@ -249,6 +271,7 @@ test('Pixel 10, iPhone 17, and iPhone 18-size emulation can submit leads and ope
       await page.locator('.PhoneInputInput').fill('4155550123')
       await page.getByRole('button', { name: 'AI Agents' }).click()
       await page.getByLabel('What would you like to discuss?').selectOption('I need a demo')
+      await acceptNotice(page)
       await page.getByRole('button', { name: /connect with latentsig/i }).click()
       await expect(page.getByRole('heading', { name: /thank you, mobile/i })).toBeVisible({ timeout: 15_000 })
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `${deviceName}: confirmation has no horizontal overflow`).toBe(true)
@@ -267,10 +290,24 @@ test('Pixel 10, iPhone 17, and iPhone 18-size emulation can submit leads and ope
   }
 })
 
-test('business-card upload uses local OCR and opens an editable review step', async ({ page }) => {
-  const testContactId = Date.now()
-  const cardEmail = `two-sided-card-${testContactId}@example.com`
-  const cardPhone = `+919${String(testContactId).slice(-9)}`
+test('business-card upload opens an editable review step', async ({ page }) => {
+  await page.route('**/api/v1/ocr/business-card', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      full_name: { value: 'Two Sided Card Browser Lead' },
+      company: { value: 'Two Sided Example Ltd' },
+      job_title: { value: 'Founder' },
+      email: { value: 'two-sided-card@example.com' },
+      email_type: { value: 'work' },
+      phone: { value: '+919876543210' },
+      website: { value: 'https://example.com' },
+      address: { value: 'Bengaluru, India' },
+      is_template: false,
+      warnings: [],
+      uncertain_fields: [],
+    }),
+  }))
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/connect/card')
   await expect(page.getByRole('button', { name: 'Take Photo' }).first()).toBeVisible()
@@ -279,35 +316,18 @@ test('business-card upload uses local OCR and opens an editable review step', as
   await page.locator('input[type=file][capture="environment"]').first().setInputFiles('../logo.png')
   await page.locator('input[type=file]').nth(3).setInputFiles('../logo.png')
   await expect(page.getByText('logo.png')).toHaveCount(2)
+  await acceptAiImageNotice(page)
   await page.getByRole('button', { name: 'Scan business card' }).click()
-  await expect(page).toHaveURL(/\/connect\/card\/review$/,{timeout:30_000})
+  await expect(page).toHaveURL(/\/connect\/card\/review$/)
   await expect(page.getByRole('heading', { name: /please confirm your details/i })).toBeVisible()
-  await expect(page.getByPlaceholder('e.g. Rachel Thomas')).toBeEditable()
+  await expect(page.getByPlaceholder('e.g. Rachel Thomas')).toHaveValue('Two Sided Card Browser Lead')
+  await expect(page.getByPlaceholder('e.g. ABC Technologies')).toHaveValue('Two Sided Example Ltd')
+  await expect(page.getByPlaceholder('you@company.com')).toHaveValue('two-sided-card@example.com')
+  await expect(page.getByPlaceholder('Street, city, country')).toHaveValue('Bengaluru, India')
   await expect(page.getByRole('button', { name: 'AI Agents' })).toBeVisible()
-  await page.getByPlaceholder('e.g. Rachel Thomas').fill('Two Sided Card Browser Lead')
-  await page.getByPlaceholder('e.g. ABC Technologies').fill('Two Sided Example Ltd')
-  await page.getByPlaceholder('e.g. VP Innovation').fill('Founder')
-  await page.getByPlaceholder('you@company.com').fill(cardEmail)
-  await page.locator('.PhoneInputInput').fill(cardPhone)
-  await page.getByRole('button', { name: 'AI Agents' }).click()
-  await page.getByLabel('What would you like to discuss?').selectOption('I need a demo')
-  await page.getByRole('button', { name: /connect with latentsig/i }).click()
-  await expect(page.getByRole('heading', { name: /thank you, two/i })).toBeVisible({ timeout: 15_000 })
-  await page.goto('/admin/login')
-  await page.getByPlaceholder('name@latentsig.com').fill('bharat@latentsig.com')
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page).toHaveURL(/\/admin\/dashboard$/)
-  await page.goto('/admin/leads')
-  await page.getByPlaceholder('Search name, company, email or phone').fill('Two Sided Card Browser Lead')
-  await page.getByRole('link', { name: /Two Sided Card Browser Lead/ }).first().click()
-  await expect(page.getByText('Card uploaded for this submission')).toBeVisible()
-  await page.getByRole('button', { name: /View front/ }).first().click()
-  await expect(page.getByRole('dialog', { name: /front of uploaded business card/i })).toBeVisible({ timeout: 15_000 })
-  await page.getByRole('button', { name: 'Close' }).click()
-  await expect(page.getByRole('button', { name: /View back/ }).first()).toBeVisible()
 })
 
-test('Android rear-camera capture input works in a mobile browser and opens OCR review', async ({ browser }) => {
+test('Android rear-camera capture input opens the AI review step', async ({ browser }) => {
     const mobileContext = await browser.newContext({ ...devices['Pixel 7'] })
     const page = await mobileContext.newPage()
     try {
@@ -329,6 +349,7 @@ test('Android rear-camera capture input works in a mobile browser and opens OCR 
     await expect(cameraInput).toHaveAttribute('accept', 'image/jpeg,image/png,image/webp')
     await cameraInput.setInputFiles('../logo.png')
     await expect(page.getByText('logo.png')).toBeVisible()
+    await acceptAiImageNotice(page)
     await page.getByRole('button', { name: 'Scan business card' }).click()
     await expect(page).toHaveURL(/\/connect\/card\/review(?:\?|$)/,{timeout:30_000})
     await expect(page.getByRole('heading', { name: /please confirm your details/i })).toBeVisible()

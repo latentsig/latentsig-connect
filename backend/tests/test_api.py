@@ -1,6 +1,5 @@
 import io
 import sqlite3
-import tempfile
 import unittest
 from pathlib import Path
 from contextlib import closing
@@ -17,7 +16,9 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.db.models import Event, IntegrationJob, Interaction, Lead, User
 from app.db.session import get_db
-from app.core.config import Settings
+from app.core.config import Settings, settings
+from app.core import rate_limit as rate_limit_module
+from app.core.passwords import hash_password
 from app.main import app
 from app.services.integrations import worker
 from app.services.backup import create_backup
@@ -25,6 +26,8 @@ from app.services.backup import create_backup
 
 class LeadApiTests(unittest.TestCase):
     def setUp(self):
+        # The in-memory limiter is process-wide; reset it between isolated API cases.
+        rate_limit_module._hits.clear()
         self.engine = create_engine(
             "sqlite://",
             connect_args={"check_same_thread": False},
@@ -67,6 +70,9 @@ class LeadApiTests(unittest.TestCase):
             "email_type": "work",
             "phone": "+14155552671",
             "website": "example.com",
+            "address": "One Example Street, Bengaluru",
+            "data_processing_consent": True,
+            "follow_up_consent": True,
             "interest": ["AI Agents"],
             "intent": "I need a demo",
             "event_slug": "test-event",
@@ -90,7 +96,11 @@ class LeadApiTests(unittest.TestCase):
             lead = db.scalar(select(Lead).where(Lead.normalized_email == "taylor@example.com"))
             self.assertIsNotNone(lead)
             self.assertEqual(lead.website, "https://example.com")
+            self.assertEqual(lead.address, "One Example Street, Bengaluru")
             interaction = db.scalar(select(Interaction).where(Interaction.lead_id == lead.id))
+            self.assertIsNotNone(interaction.data_processing_consent_at)
+            self.assertIsNotNone(interaction.follow_up_consent_at)
+            self.assertEqual(interaction.consent_notice_version, settings.consent_notice_version)
             self.assertEqual(interaction.utm_source, "qr")
             self.assertEqual(interaction.utm_medium, "booth")
             self.assertEqual(interaction.utm_campaign, "test-event")
@@ -120,6 +130,21 @@ class LeadApiTests(unittest.TestCase):
 
         with self.TestSession() as db:
             self.assertEqual(db.scalar(select(func.count()).select_from(Lead)), 0)
+
+    def test_idempotency_key_returns_original_interaction_without_duplicate(self):
+        key = str(uuid.uuid4())
+        body = self.payload(email="idempotent@example.com", phone="+14155552672")
+        first = self.client.post("/api/v1/leads", json=body, headers={"Idempotency-Key": key})
+        retry = self.client.post("/api/v1/leads", json=body, headers={"Idempotency-Key": key})
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(retry.status_code, 201, retry.text)
+        self.assertEqual(first.json(), retry.json())
+        with self.TestSession() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(Interaction)), 1)
+
+    def test_idempotency_key_must_be_a_uuid(self):
+        response = self.client.post("/api/v1/leads", json=self.payload(), headers={"Idempotency-Key": "invalid"})
+        self.assertEqual(response.status_code, 400)
 
     def test_other_interest_requires_details_and_persists_them(self):
         missing_details = self.submit(
@@ -163,11 +188,29 @@ class LeadApiTests(unittest.TestCase):
         self.assertEqual(missing_front.status_code, 422)
         self.assertEqual(manual_with_card.status_code, 422)
 
+    def test_lead_submission_requires_explicit_consent(self):
+        response = self.client.post("/api/v1/leads", json=self.payload(data_processing_consent=False))
+        self.assertEqual(response.status_code, 422)
+
+    def test_follow_up_consent_is_optional_and_recorded_separately(self):
+        response = self.submit(email="no-follow-up@example.com", phone="+14155552678", follow_up_consent=False)
+        self.assertEqual(response.status_code, 201, response.text)
+        with self.TestSession() as db:
+            interaction = db.scalar(select(Interaction).where(Interaction.id == uuid.UUID(response.json()["interaction_id"])))
+            self.assertIsNotNone(interaction.data_processing_consent_at)
+            self.assertIsNone(interaction.follow_up_consent_at)
+
+    def test_card_scan_requires_explicit_ai_processing_consent(self):
+        image = io.BytesIO()
+        Image.new("RGB", (100, 100), "white").save(image, format="JPEG")
+        response = self.client.post("/api/v1/ocr/business-card", files={"files": ("card.jpg", image.getvalue(), "image/jpeg")})
+        self.assertEqual(response.status_code, 422)
+
     def test_ocr_upload_rejects_unsupported_and_mismatched_files_before_recognition(self):
         valid_jpeg = io.BytesIO()
         Image.new("RGB", (100, 100), "white").save(valid_jpeg, format="JPEG")
-        unsupported = self.client.post("/api/v1/ocr/business-card", files={"files": ("card.txt", b"not an image", "text/plain")})
-        mismatch = self.client.post("/api/v1/ocr/business-card", files={"files": ("card.png", valid_jpeg.getvalue(), "image/png")})
+        unsupported = self.client.post("/api/v1/ocr/business-card", files={"files": ("card.txt", b"not an image", "text/plain")}, data={"ai_processing_consent": "true"})
+        mismatch = self.client.post("/api/v1/ocr/business-card", files={"files": ("card.png", valid_jpeg.getvalue(), "image/png")}, data={"ai_processing_consent": "true"})
         self.assertEqual(unsupported.status_code, 415)
         self.assertEqual(mismatch.status_code, 415)
 
@@ -256,6 +299,8 @@ class LeadApiTests(unittest.TestCase):
         lead_sheet = workbook["Leads"]
         self.assertEqual(lead_sheet.max_row, 2)
         self.assertEqual(lead_sheet.cell(2, 6).value, "shared@example.com")
+        self.assertEqual(lead_sheet.cell(1, 20).value, "Address")
+        self.assertEqual(lead_sheet.cell(2, 20).value, "One Example Street, Bengaluru")
         workbook.close()
 
     def test_viewer_cannot_export_and_unallowlisted_user_cannot_sign_in(self):
@@ -283,10 +328,14 @@ class LeadApiTests(unittest.TestCase):
             outsider = self.client.post("/api/v1/auth/email-login", json={"email": "outside@example.com"})
             self.assertEqual(outsider.status_code, 403)
             self.assertEqual(self.client.get("/api/v1/auth/google/start").status_code, 404)
-            self.assertEqual(self.client.get("/api/v1/auth/providers").status_code, 404)
-            self.assertEqual(self.client.post("/api/v1/auth/password-login", json={"email": "bharat@latentsig.com"}).status_code, 404)
+            self.assertTrue(self.client.get("/api/v1/auth/providers").json()["development_email_login"])
+            self.assertEqual(self.client.post("/api/v1/auth/password-login", json={
+                "email": "bharat@latentsig.com", "password": "incorrect password",
+            }).status_code, 401)
 
-        with patch.object(settings, "app_env", "production"):
+        with patch.object(settings, "app_env", "production"), patch.object(
+            rate_limit_module, "settings", Settings(_env_file=None, app_env="development"),
+        ):
             disabled = self.client.post("/api/v1/auth/email-login", json={"email": "bharat@latentsig.com"})
             self.assertEqual(disabled.status_code, 404)
 
@@ -297,22 +346,66 @@ class LeadApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('route="/health/ready"', response.text)
 
+    def test_auth_providers_expose_development_email_login_only_in_development(self):
+        self.assertEqual(self.client.get("/api/v1/auth/providers").json(), {
+            "password_login": True,
+            "development_email_login": True,
+        })
+        with patch.object(settings, "app_env", "production"), patch.object(
+            rate_limit_module, "settings", Settings(_env_file=None, app_env="development"),
+        ):
+            self.assertEqual(self.client.get("/api/v1/auth/providers").json(), {
+                "password_login": True,
+                "development_email_login": False,
+            })
+
+    def test_production_password_login_sets_session_for_active_allowlisted_user(self):
+        password = "correct horse battery staple"
+        with self.TestSession() as db:
+            user = db.scalar(select(User).where(User.email == "bharat@latentsig.com"))
+            user.password_hash = hash_password(password)
+            db.commit()
+
+        with patch.object(settings, "app_env", "production"), patch.object(
+            rate_limit_module, "settings", Settings(_env_file=None, app_env="development"),
+        ):
+            response = self.client.post("/api/v1/auth/password-login", json={
+                "email": "bharat@latentsig.com", "password": password,
+            })
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["email"], "bharat@latentsig.com")
+            self.assertEqual(self.client.get("/api/v1/auth/me").status_code, 200)
+
+            wrong_password = self.client.post("/api/v1/auth/password-login", json={
+                "email": "bharat@latentsig.com", "password": "wrong password long",
+            })
+            outside_allowlist = self.client.post("/api/v1/auth/password-login", json={
+                "email": "outside@example.com", "password": password,
+            })
+            self.assertEqual(wrong_password.status_code, 401)
+            self.assertEqual(outside_allowlist.status_code, 401)
+
     def test_sqlite_backup_is_integrity_checked(self):
         from app.core.config import settings
 
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "source.db"
+        root = Path(__file__).resolve().parent
+        source = root / f".backup-source-{uuid.uuid4().hex}.db"
+        backup = None
+        try:
             with closing(sqlite3.connect(source)) as database:
                 database.execute("CREATE TABLE sample (value TEXT)")
                 database.execute("INSERT INTO sample VALUES ('preserved')")
                 database.commit()
             with patch.object(settings, "database_url", f"sqlite:///{source.as_posix()}"):
-                backup = create_backup(root / "backups")
+                backup = create_backup(root)
             self.assertTrue(backup.is_file())
             with closing(sqlite3.connect(backup)) as database:
                 self.assertEqual(database.execute("PRAGMA integrity_check").fetchone()[0], "ok")
                 self.assertEqual(database.execute("SELECT value FROM sample").fetchone()[0], "preserved")
+        finally:
+            for temporary_path in (source, backup, backup.with_suffix(backup.suffix + ".partial") if backup else None):
+                if temporary_path and temporary_path.exists():
+                    temporary_path.unlink()
 
     def test_production_settings_do_not_require_google_signup_or_sheets(self):
         with self.assertRaisesRegex(ValueError, "Production requires PostgreSQL"):
@@ -320,12 +413,59 @@ class LeadApiTests(unittest.TestCase):
         settings = Settings(
             _env_file=None,
             app_env="production", app_secret="s" * 40,
-            database_url="postgresql+psycopg://latentsig:secret@db:5432/latentsig",
+            database_url=f"postgresql+psycopg://latentsig:{'s' * 40}@db:5432/latentsig",
             redis_url="redis://redis:6379/0", frontend_url="https://connect.example.com",
+            openrouter_api_key="test-only-key",
             frontend_urls="https://connect.example.com",
             admin_email_allowlist="admin@example.com", initial_admin_emails="admin@example.com",
         )
         self.assertEqual(settings.app_env, "production")
+
+    def test_production_settings_allow_manual_registration_without_openrouter(self):
+        production = Settings(
+            _env_file=None,
+            app_env="production",
+            app_secret="s" * 40,
+            database_url=f"postgresql+psycopg://latentsig:{'s' * 40}@db:5432/latentsig",
+            redis_url="redis://redis:6379/0",
+            frontend_url="https://connect.latentsig.com",
+            frontend_urls="https://connect.latentsig.com",
+            admin_email_allowlist="bhoomika@latentsig.com,bharat@latentsig.com",
+            initial_admin_emails="bhoomika@latentsig.com",
+            ocr_enabled=False,
+            openrouter_api_key="",
+        )
+        self.assertEqual(production.admin_emails, {"bhoomika@latentsig.com", "bharat@latentsig.com"})
+        production_values = {
+            "_env_file": None,
+            "app_env": "production",
+            "app_secret": "s" * 40,
+            "database_url": f"postgresql+psycopg://latentsig:{'s' * 40}@db:5432/latentsig",
+            "redis_url": "redis://redis:6379/0",
+            "frontend_url": "https://connect.latentsig.com",
+            "frontend_urls": "https://connect.latentsig.com",
+            "admin_email_allowlist": "bhoomika@latentsig.com,bharat@latentsig.com",
+            "initial_admin_emails": "bhoomika@latentsig.com",
+            "ocr_enabled": False,
+        }
+        with self.assertRaisesRegex(ValueError, "APP_SECRET must be a unique"):
+            Settings(**{**production_values, "app_secret": "replace-with-generated-random-value"})
+        with self.assertRaisesRegex(ValueError, "unique PostgreSQL password"):
+            Settings(**{**production_values, "database_url": "postgresql+psycopg://latentsig:replace-with-generated-random-value@db:5432/latentsig"})
+        with self.assertRaisesRegex(ValueError, "OPENROUTER_API_KEY is required"):
+            Settings(
+                _env_file=None,
+                app_env="production",
+                app_secret="s" * 40,
+                database_url=f"postgresql+psycopg://latentsig:{'s' * 40}@db:5432/latentsig",
+                redis_url="redis://redis:6379/0",
+                frontend_url="https://connect.latentsig.com",
+                frontend_urls="https://connect.latentsig.com",
+                admin_email_allowlist="bhoomika@latentsig.com,bharat@latentsig.com",
+                initial_admin_emails="bhoomika@latentsig.com",
+                ocr_enabled=True,
+                openrouter_api_key="",
+            )
 
 
 if __name__ == "__main__":

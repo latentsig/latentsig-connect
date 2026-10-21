@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import AuditLog, BusinessCard, Event, IntegrationJob, Interaction, Lead
+from app.db.models import AuditLog, BusinessCard, Event, IntegrationJob, Interaction, Lead, now_utc
 from app.schemas.lead import LeadSubmission
 from app.services.storage.business_cards import StagedUploadMissing, storage
 
@@ -32,7 +32,21 @@ def _lead_code(event: Event) -> str:
     return f"LS-{prefix}-{next_number:06d}"
 
 
-def create_lead_submission(db: Session, payload: LeadSubmission) -> dict[str, str | bool]:
+def _idempotent_result(db: Session, key: str) -> dict[str, str | bool] | None:
+    interaction = db.scalar(select(Interaction).where(Interaction.idempotency_key == key))
+    if interaction is None:
+        return None
+    lead = db.get(Lead, interaction.lead_id)
+    if lead is None:
+        return None
+    return {"id": str(lead.id), "lead_code": lead.lead_code, "interaction_id": str(interaction.id), "created": bool(interaction.submission_created)}
+
+
+def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key: str | None = None) -> dict[str, str | bool]:
+    if idempotency_key:
+        previous = _idempotent_result(db, idempotency_key)
+        if previous:
+            return previous
     card_tokens = {"front": payload.business_card_token, "back": payload.business_card_back_token}
     if payload.capture_method == "business_card" and not card_tokens["front"]:
         raise HTTPException(status_code=422, detail="Please scan your business card again before submitting.")
@@ -53,7 +67,7 @@ def create_lead_submission(db: Session, payload: LeadSubmission) -> dict[str, st
         lead = Lead(
             lead_code=_lead_code(event), full_name=payload.full_name, company=payload.company,
             job_title=payload.job_title, email=str(payload.email), email_type=payload.email_type,
-            normalized_email=email, phone=phone, normalized_phone=phone, website=payload.website,
+            normalized_email=email, phone=phone, normalized_phone=phone, website=payload.website, address=payload.address,
             country=phone_country,
         )
         db.add(lead)
@@ -70,11 +84,16 @@ def create_lead_submission(db: Session, payload: LeadSubmission) -> dict[str, st
         lead.normalized_phone = phone
         lead.country = phone_country
         lead.website = payload.website or lead.website
+        lead.address = payload.address or lead.address
 
     interaction = Interaction(
         lead_id=lead.id, event_id=event.id, interest=payload.interest, intent=payload.intent,
         other_interest_details=payload.other_interest_details, other_intent_details=payload.other_intent_details,
         requirement_message=payload.requirement_message, capture_method=payload.capture_method,
+        data_processing_consent_at=now_utc(),
+        follow_up_consent_at=now_utc() if payload.follow_up_consent else None,
+        consent_notice_version=settings.consent_notice_version,
+        idempotency_key=idempotency_key, submission_created=created,
         source=payload.source, captured_by=payload.captured_by or payload.source,
         utm_source=payload.utm_source, utm_medium=payload.utm_medium,
         utm_campaign=payload.utm_campaign, status="new",
@@ -92,6 +111,15 @@ def create_lead_submission(db: Session, payload: LeadSubmission) -> dict[str, st
             staged_metadata[side] = storage.metadata(token)
         except StagedUploadMissing:
             raise HTTPException(status_code=422, detail=f"The {side} image expired. Please upload the card again.") from None
+    front_metadata = staged_metadata.get("front", {})
+    if payload.capture_method == "business_card":
+        raw_consent_at = front_metadata.get("ai_processing_consent_at")
+        consent_version = front_metadata.get("ai_processing_consent_notice_version")
+        if not raw_consent_at or consent_version != settings.consent_notice_version:
+            raise HTTPException(status_code=422, detail="Card scanning consent was not recorded for the current notice. Please scan the card again.")
+        from datetime import datetime
+        interaction.ai_processing_consent_at = datetime.fromisoformat(raw_consent_at)
+        interaction.ai_processing_consent_notice_version = consent_version
     front_storage_path = back_storage_path = None
     front_file_size = back_file_size = None
     try:
@@ -133,6 +161,10 @@ def create_lead_submission(db: Session, payload: LeadSubmission) -> dict[str, st
         db.rollback()
         for path in attached_storage_paths:
             storage.delete(path)
+        if idempotency_key:
+            previous = _idempotent_result(db, idempotency_key)
+            if previous:
+                return previous
         raise HTTPException(status_code=409, detail="This contact changed while it was being saved. Please submit once more.") from None
     except Exception:
         db.rollback()

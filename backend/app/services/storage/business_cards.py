@@ -32,13 +32,14 @@ class BusinessCardStorage:
         elif self.provider != "local":
             raise RuntimeError("STORAGE_PROVIDER must be 'local' or 's3'")
 
-    def stage(self, data: bytes, filename: str, mime_type: str) -> str:
+    def stage(self, data: bytes, filename: str, mime_type: str, metadata: dict[str, str] | None = None) -> str:
         self.cleanup_expired_staging()
         token = str(uuid.uuid4())
         (self.staging / f"{token}.upload").write_bytes(data)
         safe_name = Path(filename or "business-card").name
         safe_name = "".join(char for char in safe_name if char.isprintable() and char not in '<>:"|?*')[:255] or "business-card"
-        (self.staging / f"{token}.json").write_text(json.dumps({"filename": safe_name, "mime_type": mime_type}), encoding="utf-8")
+        sidecar = {"filename": safe_name, "mime_type": mime_type, **(metadata or {})}
+        (self.staging / f"{token}.json").write_text(json.dumps(sidecar), encoding="utf-8")
         return token
 
     def metadata(self, token: str) -> dict[str, str]:

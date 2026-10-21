@@ -37,11 +37,12 @@ async def _sqlite_backup_loop():
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     storage.cleanup_expired_staging()
-    with SessionLocal() as db:
-        event = db.scalar(select(Event).where(Event.slug == settings.default_event_slug))
-        if event is None:
-            db.add(Event(name="Bengaluru Tech Summit 2026", slug=settings.default_event_slug, location="Bengaluru", is_active=True))
-            db.commit()
+    if not app.dependency_overrides:
+        with SessionLocal() as db:
+            event = db.scalar(select(Event).where(Event.slug == settings.default_event_slug))
+            if event is None:
+                db.add(Event(name="Bengaluru Tech Summit 2026", slug=settings.default_event_slug, location="Bengaluru", is_active=True))
+                db.commit()
     backup_task = None
     if settings.database_url.startswith("sqlite:") and not app.dependency_overrides:
         backup_task = asyncio.create_task(_sqlite_backup_loop())

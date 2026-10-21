@@ -17,7 +17,7 @@ from app.db.models import AuditLog, Interaction, LeadNote, User
 from app.db.session import get_db
 
 router = APIRouter(prefix="/admin/exports", tags=["exports"])
-HEADERS = ["Lead ID", "Created At", "Full Name", "Company", "Job Title", "Email", "WhatsApp", "Website", "Interest", "Other Interest Details", "Intent", "Other Discussion Details", "Visitor Feedback", "Capture Method", "Source", "Captured By", "Assigned To", "Status", "Notes"]
+HEADERS = ["Lead ID", "Created At", "Full Name", "Company", "Job Title", "Email", "WhatsApp", "Website", "Interest", "Other Interest Details", "Intent", "Other Discussion Details", "Visitor Feedback", "Capture Method", "Source", "Captured By", "Assigned To", "Status", "Notes", "Address", "Data Processing Consent At", "Follow-up Consent At", "Consent Notice Version", "AI Processing Consent Recorded At", "AI Consent Notice Version"]
 
 
 def _safe_cell(value):
@@ -67,7 +67,11 @@ def export_leads(
             ", ".join(interaction.interest), interaction.other_interest_details or "", interaction.intent,
             interaction.other_intent_details or "", interaction.requirement_message or "",
             interaction.capture_method, interaction.source, interaction.captured_by or "",
-            assignee.full_name if assignee else "", interaction.status, " | ".join(notes),
+            assignee.full_name if assignee else "", interaction.status, " | ".join(notes), lead.address or "",
+            interaction.data_processing_consent_at.isoformat() if interaction.data_processing_consent_at else "",
+            interaction.follow_up_consent_at.isoformat() if interaction.follow_up_consent_at else "", interaction.consent_notice_version or "",
+            interaction.ai_processing_consent_at.isoformat() if interaction.ai_processing_consent_at else "",
+            interaction.ai_processing_consent_notice_version or "",
         ]])
         by_status[interaction.status] = by_status.get(interaction.status, 0) + 1
         for item in interaction.interest:
@@ -77,7 +81,7 @@ def export_leads(
         assigned = assignee.full_name if assignee else "Unassigned"
         by_assigned[assigned] = by_assigned.get(assigned, 0) + 1
         by_capture_method[interaction.capture_method] = by_capture_method.get(interaction.capture_method, 0) + 1
-    _style_sheet(leads_sheet, [20, 25, 25, 26, 23, 32, 20, 28, 28, 30, 36, 30, 42, 18, 22, 20, 22, 18, 22, 48])
+    _style_sheet(leads_sheet, [20, 25, 25, 26, 23, 32, 20, 28, 28, 30, 36, 30, 42, 18, 22, 20, 22, 18, 22, 48, 28, 30, 28, 24, 32, 26])
 
     summary = workbook.create_sheet("Summary")
     summary.append(["Measure", "Value"])

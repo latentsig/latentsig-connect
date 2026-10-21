@@ -1,0 +1,14 @@
+{
+  "id": "/connect",
+  "name": "LatentSig Connect",
+  "short_name": "Connect",
+  "description": "Connect with the LatentSig team.",
+  "start_url": "/connect",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f8fb",
+  "theme_color": "#07112d",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

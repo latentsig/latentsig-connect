@@ -27,7 +27,7 @@ class LeadSchemaTests(unittest.TestCase):
         payload = LeadSubmission(
             full_name="Taylor Example", company="Example Co", job_title="CTO",
             email="taylor@example.com", phone="+14155552671", website="example.com",
-            interest=["AI Agents", "AI Agents"], intent="I need a demo",
+            interest=["AI Agents", "AI Agents"], intent="I need a demo", data_processing_consent=True,
         )
         self.assertEqual(payload.website, "https://example.com")
         self.assertEqual(payload.interest, ["AI Agents"])
@@ -37,7 +37,7 @@ class LeadSchemaTests(unittest.TestCase):
             LeadSubmission(
                 full_name="Taylor Example", company="Example Co", job_title="CTO",
                 email="taylor@example.com", phone="+14155552671", interest=["Unlisted"],
-                intent="I need a demo",
+                intent="I need a demo", data_processing_consent=True,
             )
 
 

@@ -20,11 +20,14 @@ class LeadSubmission(BaseModel):
     email_type: Literal["work", "personal"] = "work"
     phone: str = Field(min_length=7, max_length=40)
     website: str | None = Field(default=None, max_length=500)
+    address: str | None = Field(default=None, max_length=500)
     interest: list[str] = Field(min_length=1, max_length=8)
     intent: str = Field(min_length=1, max_length=180)
     other_interest_details: str | None = Field(default=None, max_length=100)
     other_intent_details: str | None = Field(default=None, max_length=100)
     requirement_message: str | None = Field(default=None, max_length=1000)
+    data_processing_consent: bool
+    follow_up_consent: bool = False
     capture_method: Literal["manual", "business_card"] = "manual"
     event_slug: str | None = Field(default=None, max_length=120)
     captured_by: str | None = Field(default=None, max_length=180)
@@ -43,7 +46,7 @@ class LeadSubmission(BaseModel):
             return f"https://{value}"
         return value
 
-    @field_validator("full_name", "company", "job_title", "other_interest_details", "other_intent_details", "requirement_message", "source", "captured_by", "utm_source", "utm_medium", "utm_campaign")
+    @field_validator("full_name", "company", "job_title", "address", "other_interest_details", "other_intent_details", "requirement_message", "source", "captured_by", "utm_source", "utm_medium", "utm_campaign")
     @classmethod
     def remove_control_characters(cls, value: str | None) -> str | None:
         return _strip_control_characters(value)
@@ -57,6 +60,8 @@ class LeadSubmission(BaseModel):
 
     @model_validator(mode="after")
     def require_other_interest_details(self):
+        if not self.data_processing_consent:
+            raise ValueError("Please accept the data processing notice before submitting.")
         required_answers = []
         if "Other" in self.interest:
             required_answers.append((self.other_interest_details, "Please explain your interest in 5 words or fewer."))

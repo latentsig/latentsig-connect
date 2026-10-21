@@ -58,14 +58,27 @@ function CardImageButton({ leadId, interactionId, side = 'front', label = 'View 
 
 function AdminLogin() {
   const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [loginMode, setLoginMode] = useState<'password' | 'development' | null>(null)
   const [error, setError] = useState('')
   const navigate = useNavigate()
+  useEffect(() => {
+    void request<{ password_login: boolean; development_email_login: boolean }>('/api/v1/auth/providers')
+      .then(providers => setLoginMode(providers.development_email_login ? 'development' : 'password'))
+      .catch(() => setLoginMode('password'))
+  }, [])
   async function signIn(event: React.FormEvent) {
     event.preventDefault(); setError('')
-    try { await request('/api/v1/auth/email-login', { method: 'POST', body: JSON.stringify({ email }) }); navigate('/admin/dashboard') }
+    if (!loginMode) return
+    try {
+      const endpoint = loginMode === 'development' ? '/api/v1/auth/email-login' : '/api/v1/auth/password-login'
+      const body = loginMode === 'development' ? { email } : { email, password }
+      await request(endpoint, { method: 'POST', body: JSON.stringify(body) })
+      navigate('/admin/dashboard')
+    }
     catch (err) { setError(err instanceof Error ? err.message : 'Sign in failed.') }
   }
-  return <main className="admin-login"><Link to="/connect" className="admin-brand"><img src="/logo.png" alt="LatentSig"/></Link><section className="login-card"><span className="admin-kicker">TEAM WORKSPACE</span><h1>Welcome back.</h1><p>Sign in to view and manage captured leads.</p><form onSubmit={signIn}><label>Email address<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@latentsig.com" autoComplete="email"/></label>{error && <p className="admin-error" role="alert">{error}</p>}<button className="admin-primary">Sign in</button></form><small>For local use only. Access is limited to the five approved team email addresses.</small></section></main>
+  return <main className="admin-login"><Link to="/connect" className="admin-brand"><img src="/logo.png" alt="LatentSig"/></Link><section className="login-card"><span className="admin-kicker">TEAM WORKSPACE</span><h1>Welcome back.</h1><p>Sign in to view and manage captured leads.</p><form onSubmit={signIn}><label>Email address<input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@latentsig.com" autoComplete="username"/></label>{loginMode === 'password' && <label>Password<input type="password" required minLength={12} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password"/></label>}{error && <p className="admin-error" role="alert">{error}</p>}<button className="admin-primary" disabled={!loginMode}>Sign in</button></form><small>{loginMode === 'development' ? 'Development sign-in is enabled for allowlisted team emails only.' : 'Use the password provisioned for your allowlisted team account.'}</small></section></main>
 }
 
 function AdminGate({ children }: { children: React.ReactNode }) {
@@ -230,6 +243,10 @@ function LeadDetail() {
           <dt>Email</dt><dd><a href={`mailto:${data.email}`}>{data.email}</a><small>{data.email_type} email</small></dd>
           <dt>WhatsApp / phone</dt><dd><a href={wa} target="_blank" rel="noreferrer">{data.phone}</a></dd>
           <dt>Website</dt><dd>{data.website ? <a href={data.website} target="_blank" rel="noreferrer">{data.website}</a> : '?'}</dd>
+          <dt>Business address</dt><dd>{data.address || '?'}</dd>
+          <dt>Data processing consent</dt><dd>{latest.data_processing_consent_at ? `Recorded ${stamp(latest.data_processing_consent_at)}` : 'Not recorded'}</dd>
+          <dt>Follow-up consent</dt><dd>{latest.follow_up_consent_at ? `Yes · ${stamp(latest.follow_up_consent_at)}` : 'No'}</dd>
+          {latest.ai_processing_consent_at && <><dt>AI image consent</dt><dd>Recorded {stamp(latest.ai_processing_consent_at)}</dd></>}
         </dl>
         <div className="detail-actions"><a href={wa} target="_blank" rel="noreferrer">WhatsApp</a><a href={`mailto:${data.email}`}>Email</a></div>
       </section>

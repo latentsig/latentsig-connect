@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: latentsig
       POSTGRES_USER: latentsig
@@ -15,6 +16,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -23,6 +25,7 @@ services:
 
   backend:
     build: ./backend
+    restart: unless-stopped
     environment: &app_environment
       APP_ENV: ${APP_ENV:-development}
       APP_SECRET: ${APP_SECRET:-local-compose-only-change-before-sharing}
@@ -31,6 +34,7 @@ services:
       FRONTEND_URLS: ${FRONTEND_URLS:-http://localhost:8080,http://127.0.0.1:8080}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8080/api/v1/auth/google/callback}
       REDIS_URL: redis://redis:6379/0
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}
       PRIVATE_STORAGE_DIR: /app/private_storage
       ADMIN_EMAIL_ALLOWLIST: ${ADMIN_EMAIL_ALLOWLIST:-bharat@latentsig.com,bhoomika@latentsig.com,raksha@latentsig.com}
       INITIAL_ADMIN_EMAILS: ${INITIAL_ADMIN_EMAILS:-bharat@latentsig.com,bhoomika@latentsig.com}
@@ -41,6 +45,15 @@ services:
       GOOGLE_PRIVATE_KEY: ${GOOGLE_PRIVATE_KEY:-}
       GOOGLE_SHEET_ID: ${GOOGLE_SHEET_ID:-}
       WHATSAPP_NUMBER: ${WHATSAPP_NUMBER:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-3.8-flash}
+      OCR_PROVIDER: ${OCR_PROVIDER:-openrouter}
+      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-20}
+      OCR_MAX_RETRIES: ${OCR_MAX_RETRIES:-2}
+      OCR_MAX_OUTPUT_TOKENS: ${OCR_MAX_OUTPUT_TOKENS:-1000}
+      OCR_ENABLED: ${OCR_ENABLED:-true}
+      CONSENT_NOTICE_VERSION: ${CONSENT_NOTICE_VERSION:-2026-10-21-v1}
     volumes:
       - private_cards:/app/private_storage
     depends_on:
@@ -56,11 +69,14 @@ services:
 
   integration-worker:
     build: ./backend
+    restart: unless-stopped
     command: ["python", "-m", "app.services.integrations.worker"]
     environment: *app_environment
     volumes:
       - private_cards:/app/private_storage
     depends_on:
+      backend:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -86,6 +102,7 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.5.0
+    restart: unless-stopped
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=15d"]
     ports:
       - "127.0.0.1:9090:9090"
@@ -98,15 +115,60 @@ services:
         condition: service_healthy
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+        VITE_PUBLIC_SITE_URL: ${FRONTEND_URL:-http://localhost:8080}
+    restart: unless-stopped
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     depends_on:
       backend:
         condition: service_healthy
+
+  nginx:
+    build: ./deploy/nginx
+    restart: unless-stopped
+    profiles: [production]
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-connect.latentsig.com}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot_webroot:/var/www/certbot:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  certbot:
+    image: certbot/certbot:v5.5.0
+    profiles: [certificates]
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-connect.latentsig.com}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL:-bhoomika@latentsig.com}
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    entrypoint: ["certbot"]
+    command: ["certonly", "--webroot", "-w", "/var/www/certbot", "--email", "${CERTBOT_EMAIL:-bhoomika@latentsig.com}", "--agree-tos", "--no-eff-email", "-d", "${PUBLIC_DOMAIN:-connect.latentsig.com}"]
+    depends_on:
+      nginx:
+        condition: service_started
 
 volumes:
   postgres_data:
   private_cards:
   database_backups:
   prometheus_data:
+  letsencrypt:
+  certbot_webroot:

@@ -1,0 +1,1 @@
+"""Hosted vision extraction services."""

@@ -59,6 +59,7 @@ class Lead(Base):
     normalized_phone: Mapped[str] = mapped_column(String(40), index=True)
     country: Mapped[str | None] = mapped_column(String(2), nullable=True)
     website: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
     interactions: Mapped[list["Interaction"]] = relationship(back_populates="lead", cascade="all, delete-orphan")
@@ -68,7 +69,10 @@ class Lead(Base):
 
 class Interaction(Base):
     __tablename__ = "interactions"
-    __table_args__ = (Index("ix_interactions_created_at", "created_at"), Index("ix_interactions_status", "status"))
+    __table_args__ = (
+        Index("ix_interactions_created_at", "created_at"), Index("ix_interactions_status", "status"),
+        Index("ix_interactions_idempotency_key", "idempotency_key", unique=True),
+    )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     lead_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
     event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("events.id"), nullable=True, index=True)
@@ -77,6 +81,13 @@ class Interaction(Base):
     other_interest_details: Mapped[str | None] = mapped_column(Text, nullable=True)
     other_intent_details: Mapped[str | None] = mapped_column(Text, nullable=True)
     requirement_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data_processing_consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    follow_up_consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consent_notice_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    ai_processing_consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ai_processing_consent_notice_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    submission_created: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     capture_method: Mapped[str] = mapped_column(String(30))
     source: Mapped[str] = mapped_column(String(180), default="direct")
     captured_by: Mapped[str | None] = mapped_column(String(180), nullable=True)

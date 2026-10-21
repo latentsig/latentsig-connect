@@ -65,7 +65,7 @@ def _lead_row(lead: Lead, interaction: Interaction, db: Session) -> dict:
         "id": str(lead.id), "lead_code": lead.lead_code, "full_name": lead.full_name,
         "company": lead.company, "job_title": lead.job_title, "email": lead.email,
         "email_type": lead.email_type, "phone": lead.phone, "normalized_phone": lead.normalized_phone, "country": lead.country,
-        "website": lead.website, "created_at": lead.created_at.isoformat(), "updated_at": lead.updated_at.isoformat(),
+        "website": lead.website, "address": lead.address, "created_at": lead.created_at.isoformat(), "updated_at": lead.updated_at.isoformat(),
         "interaction": {
             "id": str(interaction.id), "event_id": str(interaction.event_id) if interaction.event_id else None,
             "event": event.name if event else None, "event_slug": event.slug if event else None,
@@ -73,6 +73,11 @@ def _lead_row(lead: Lead, interaction: Interaction, db: Session) -> dict:
             "other_interest_details": interaction.other_interest_details,
             "other_intent_details": interaction.other_intent_details,
             "requirement_message": interaction.requirement_message, "capture_method": interaction.capture_method,
+            "data_processing_consent_at": interaction.data_processing_consent_at.isoformat() if interaction.data_processing_consent_at else None,
+            "follow_up_consent_at": interaction.follow_up_consent_at.isoformat() if interaction.follow_up_consent_at else None,
+            "consent_notice_version": interaction.consent_notice_version,
+            "ai_processing_consent_at": interaction.ai_processing_consent_at.isoformat() if interaction.ai_processing_consent_at else None,
+            "ai_processing_consent_notice_version": interaction.ai_processing_consent_notice_version,
             "business_card": {"has_back": bool(business_card.back_storage_path)} if business_card else None,
             "source": interaction.source, "captured_by": interaction.captured_by,
             "utm_source": interaction.utm_source, "utm_medium": interaction.utm_medium,
@@ -216,7 +221,7 @@ def lead_detail(lead_id: uuid.UUID, db: Session = Depends(get_db), user: User = 
     return {
         "id": str(lead.id), "lead_code": lead.lead_code, "full_name": lead.full_name,
         "company": lead.company, "job_title": lead.job_title, "email": lead.email,
-        "email_type": lead.email_type, "phone": lead.phone, "country": lead.country, "website": lead.website,
+        "email_type": lead.email_type, "phone": lead.phone, "country": lead.country, "website": lead.website, "address": lead.address,
         "interactions": history,
         "notes": [{"id": str(note.id), "note": note.note, "author": note.author.full_name, "created_at": note.created_at.isoformat()} for note in notes],
     }
