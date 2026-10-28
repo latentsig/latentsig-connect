@@ -3,16 +3,33 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   deployment-config:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Validate production Compose profiles
         run: docker compose --profile production --profile certificates config --quiet
       - name: Check deployment shell syntax
-        run: sh -n scripts/issue-tls-certificate.sh scripts/renew-tls-certificate.sh deploy/nginx/select-config.sh
+        run: |
+          for script in scripts/backup-postgres.sh scripts/issue-tls-certificate.sh scripts/renew-tls-certificate.sh deploy/nginx/select-config.sh; do
+            sh -n "$script"
+          done
+          for script in deploy/gcp/*.sh; do
+            bash -n "$script"
+          done
+      - name: Check GCP deployment Python
+        run: |
+          python -m compileall -q deploy/gcp
+          python deploy/gcp/test_deploy_archive.py
       - name: Build and validate Nginx bootstrap configuration
         run: |
           docker build -t latentsig-nginx-config ./deploy/nginx
@@ -25,6 +42,7 @@ jobs:
             -out "$RUNNER_TEMP/certificates/live/connect.latentsig.com/fullchain.pem" \
             -subj "/CN=connect.latentsig.com"
           docker run --rm -e PUBLIC_DOMAIN=connect.latentsig.com \
+            --add-host backend:127.0.0.1 --add-host frontend:127.0.0.1 \
             -v "$RUNNER_TEMP/certificates:/etc/letsencrypt:ro" \
             latentsig-nginx-config nginx -t
 
@@ -74,11 +92,11 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
       - run: python -m pip install -r requirements-dev.txt
-      - run: ruff check app tests
+      - run: ruff check app tests ../deploy/gcp
       - run: alembic upgrade head
         env:
           DATABASE_URL: postgresql+psycopg://latentsig:ci-password@localhost:5432/latentsig
-      - run: pytest -q
+      - run: python -m pytest -q
         env:
           APP_ENV: development
           DATABASE_URL: postgresql+psycopg://latentsig:ci-password@localhost:5432/latentsig
