@@ -1,4 +1,5 @@
 import io
+import os
 import sqlite3
 import unittest
 from pathlib import Path
@@ -26,6 +27,15 @@ from app.services.backup import create_backup
 
 class LeadApiTests(unittest.TestCase):
     def setUp(self):
+        environment_patch = patch.dict(os.environ, {
+            "DATABASE_URL": "sqlite:///./latentsig.db",
+            "REDIS_URL": "",
+        })
+        self.addCleanup(environment_patch.stop)
+        environment_patch.start()
+        redis_patch = patch.object(settings, "redis_url", "")
+        self.addCleanup(redis_patch.stop)
+        redis_patch.start()
         # The in-memory limiter is process-wide; reset it between isolated API cases.
         rate_limit_module._hits.clear()
         self.engine = create_engine(
@@ -35,6 +45,9 @@ class LeadApiTests(unittest.TestCase):
         )
         Base.metadata.create_all(self.engine)
         self.TestSession = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
+        session_patch = patch("app.main.SessionLocal", self.TestSession)
+        self.addCleanup(session_patch.stop)
+        session_patch.start()
 
         with self.TestSession() as db:
             db.add_all([
