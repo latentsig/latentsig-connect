@@ -5,3 +5,7 @@ private_storage
 __pycache__
 *.py[cod]
 tests
+._*
+**/._*
+__MACOSX
+**/__MACOSX
