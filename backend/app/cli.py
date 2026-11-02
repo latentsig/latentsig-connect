@@ -76,10 +76,10 @@ def verify_ocr() -> None:
     try:
         result = extract_card([(buffer.getvalue(), "image/png")])
     except (VisionConfigurationError, VisionUnavailable):
-        raise SystemExit("OpenRouter OCR smoke test failed. Check the production provider configuration and model availability.") from None
+        raise SystemExit("OCR smoke test failed. Check the configured provider and model availability.") from None
     if result.is_template:
-        raise SystemExit("OpenRouter OCR smoke test returned an unexpected template classification.")
-    print("OpenRouter OCR smoke test passed. Synthetic image only; no lead was created and no extracted data was logged.")
+        raise SystemExit("OCR smoke test returned an unexpected template classification.")
+    print("OCR smoke test passed. Synthetic image only; no lead was created and no extracted data was logged.")
 
 
 def main() -> None:
@@ -89,7 +89,7 @@ def main() -> None:
     admin.add_argument("email")
     password = commands.add_parser("set-password", help="Set an allowlisted team account password interactively")
     password.add_argument("email")
-    commands.add_parser("verify-ocr", help="Verify OpenRouter card extraction with synthetic data")
+    commands.add_parser("verify-ocr", help="Verify card extraction with synthetic data")
     args = parser.parse_args()
     if args.command == "grant-admin":
         grant_admin(args.email)

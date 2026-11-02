@@ -33,30 +33,50 @@ _JSON_SCHEMA = {
 def _request(images: list[tuple[bytes, str]]) -> CardExtraction:
     if not settings.ocr_enabled:
         raise VisionConfigurationError("Business-card scanning is disabled.")
-    if not settings.openrouter_api_key:
-        raise VisionConfigurationError("Business-card scanning is not configured.")
-    base = settings.openrouter_base_url.rstrip("/")
-    if not base.startswith("https://"):
-        raise VisionConfigurationError("OpenRouter base URL must use HTTPS.")
-    content: list[dict[str, object]] = [{"type": "text", "text": "Extract contact details from these card image(s)."}]
-    for image, mime_type in images:
-        encoded = base64.b64encode(image).decode("ascii")
-        content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}})
-    payload = {
-        "model": settings.openrouter_model,
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}],
-        "max_tokens": settings.ocr_max_output_tokens,
-        "temperature": 0,
-        "response_format": {"type": "json_schema", "json_schema": {"name": "business_card", "strict": True, "schema": _JSON_SCHEMA}},
-    }
-    request = Request(f"{base}/chat/completions", data=json.dumps(payload).encode("utf-8"), headers={
-        "Authorization": f"Bearer {settings.openrouter_api_key}", "Content-Type": "application/json",
-        "HTTP-Referer": settings.frontend_url, "X-Title": "LatentSig Connect",
-    }, method="POST")
+    provider = settings.ocr_provider.lower()
+    headers = {"Content-Type": "application/json"}
+    if provider == "ollama":
+        base = settings.ollama_base_url.rstrip("/")
+        if not base.startswith(("http://", "https://")):
+            raise VisionConfigurationError("Ollama base URL must use HTTP or HTTPS.")
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "Extract contact details from these card image(s).", "images": [base64.b64encode(image).decode("ascii") for image, _ in images]},
+        ]
+        payload = {
+            "model": settings.ollama_model, "messages": messages, "stream": False,
+            "format": _JSON_SCHEMA,
+            "options": {"temperature": 0, "num_predict": settings.ocr_max_output_tokens, "num_ctx": 4096},
+        }
+        endpoint = f"{base}/api/chat"
+        response_path = "ollama"
+    elif provider == "openrouter":
+        if not settings.openrouter_api_key:
+            raise VisionConfigurationError("Business-card scanning is not configured.")
+        base = settings.openrouter_base_url.rstrip("/")
+        if not base.startswith("https://"):
+            raise VisionConfigurationError("OpenRouter base URL must use HTTPS.")
+        content: list[dict[str, object]] = [{"type": "text", "text": "Extract contact details from these card image(s)."}]
+        for image, mime_type in images:
+            encoded = base64.b64encode(image).decode("ascii")
+            content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}})
+        payload = {
+            "model": settings.openrouter_model,
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}],
+            "max_tokens": settings.ocr_max_output_tokens,
+            "temperature": 0,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "business_card", "strict": True, "schema": _JSON_SCHEMA}},
+        }
+        endpoint = f"{base}/chat/completions"
+        headers.update({"Authorization": f"Bearer {settings.openrouter_api_key}", "HTTP-Referer": settings.frontend_url, "X-Title": "LatentSig Connect"})
+        response_path = "openrouter"
+    else:
+        raise VisionConfigurationError("Business-card scanning provider is not supported.")
+    request = Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     try:
         with urlopen(request, timeout=settings.ocr_timeout_seconds) as response:
             body = json.loads(response.read())
-        text = body["choices"][0]["message"]["content"]
+        text = body["message"]["content"] if response_path == "ollama" else body["choices"][0]["message"]["content"]
         if isinstance(text, list):
             text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
         parsed = CardExtraction.model_validate_json(text)
@@ -72,7 +92,7 @@ def _request(images: list[tuple[bytes, str]]) -> CardExtraction:
         return CardExtraction.model_validate(cleaned)
     except HTTPError as exc:
         # Do not log provider response bodies: they may contain submitted data.
-        logger.warning("OpenRouter request failed with HTTP status %s", exc.code)
+        logger.warning("OCR provider request failed with HTTP status %s", exc.code)
         raise VisionUnavailable from None
     except (URLError, TimeoutError, OSError, KeyError, IndexError, TypeError, ValueError, ValidationError):
         raise VisionUnavailable from None

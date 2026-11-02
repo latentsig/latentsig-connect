@@ -199,12 +199,12 @@ function CardUpload() {
       <div className="card-side"><b>Front of card <em>*</em></b>{frontFile ? <div className="selected-file"><span>{frontFile.name}</span><button type="button" onClick={() => {setFrontFile(null);setError('')}}>Remove</button></div> : <div className="card-upload-actions"><button type="button" className="primary-button" onClick={() => cameraInput.current?.click()}><ScanLine size={18}/> Take Photo</button><button type="button" className="upload-secondary" onClick={() => uploadInput.current?.click()}><Upload size={17}/> Upload Image</button></div>}</div>
       <div className="card-side"><b>Back of card <small>OPTIONAL</small></b>{backFile ? <div className="selected-file"><span>{backFile.name}</span><button type="button" onClick={() => {setBackFile(null);setError('')}}>Remove</button></div> : <div className="card-upload-actions"><button type="button" className="upload-secondary" onClick={() => backCameraInput.current?.click()}><ScanLine size={18}/> Take Photo</button><button type="button" className="upload-secondary" onClick={() => backUploadInput.current?.click()}><Upload size={17}/> Upload Image</button></div>}</div>
       <small className="upload-format">JPG, PNG, WEBP · max 10 MB per side</small>
-      <label className="consent ai-consent"><input type="checkbox" checked={aiProcessingConsent} onChange={event => setAiProcessingConsent(event.target.checked)} /><span>I agree to send this card image to an AI provider to extract my contact details.</span></label>
+      <label className="consent ai-consent"><input type="checkbox" checked={aiProcessingConsent} onChange={event => setAiProcessingConsent(event.target.checked)} /><span>I agree LatentSig may process this card image with its configured AI scanner to extract my contact details.</span></label>
       {error && <div className="api-error" role="alert">{error}</div>}
       {frontFile && <button className="primary-button scan-submit" onClick={upload} disabled={busy}>{busy ? 'Reading your card…' : 'Scan business card'}<ArrowRight size={18}/></button>}
       <button className="text-button" onClick={() => navigate(withAttribution('/connect/manual'))}>I?ll enter my details instead <ChevronRight size={16}/></button>
     </div>
-    <p className="secure-caption"><LockKeyhole size={14}/> Card scanning sends the image to OpenRouter and the selected AI model provider to extract contact details. Manual entry does not send a card image.</p>
+    <p className="secure-caption"><LockKeyhole size={14}/> Production scans run on LatentSig’s self-hosted MiniCPM-OCR service. Manual entry does not send a card image.</p>
   </PageFrame>
 }
 

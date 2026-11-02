@@ -49,8 +49,10 @@ services:
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-3.8-flash}
       OCR_PROVIDER: ${OCR_PROVIDER:-openrouter}
-      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-20}
-      OCR_MAX_RETRIES: ${OCR_MAX_RETRIES:-2}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-openbmb/minicpm-ocr1.0}
+      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-85}
+      OCR_MAX_RETRIES: ${OCR_MAX_RETRIES:-0}
       OCR_MAX_OUTPUT_TOKENS: ${OCR_MAX_OUTPUT_TOKENS:-1000}
       OCR_ENABLED: ${OCR_ENABLED:-true}
       CONSENT_NOTICE_VERSION: ${CONSENT_NOTICE_VERSION:-2026-10-21-v1}
@@ -150,6 +152,35 @@ services:
       timeout: 5s
       retries: 5
 
+  ollama:
+    image: ollama/ollama:0.40.13
+    profiles: [production]
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: 5m
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        server_pid=$$!
+        until ollama list >/dev/null 2>&1; do
+          kill -0 "$$server_pid" 2>/dev/null || exit 1
+          sleep 2
+        done
+        ollama pull openbmb/minicpm-ocr1.0
+        wait "$$server_pid"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q 'openbmb/minicpm-ocr1.0'"]
+      interval: 15s
+      timeout: 10s
+      retries: 120
+      start_period: 30s
+    mem_limit: 4g
+    cpus: 2.0
+
   certbot:
     image: certbot/certbot:v5.5.0
     profiles: [certificates]
@@ -172,3 +203,4 @@ volumes:
   prometheus_data:
   letsencrypt:
   certbot_webroot:
+  ollama_data:

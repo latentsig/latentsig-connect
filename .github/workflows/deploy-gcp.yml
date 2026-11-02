@@ -14,7 +14,7 @@ jobs:
   deploy:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     environment: production
     permissions:
       contents: read
@@ -32,13 +32,11 @@ jobs:
         env:
           WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           DEPLOYER_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Deployments must run from main.' >&2; exit 1; }
           [[ -n "$WIF_PROVIDER" ]] || { echo 'Set production environment variable GCP_WORKLOAD_IDENTITY_PROVIDER.' >&2; exit 1; }
           [[ "$DEPLOYER_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]] || { echo 'Set production environment variable GCP_DEPLOYER_SERVICE_ACCOUNT.' >&2; exit 1; }
-          [[ "$OPENROUTER_API_KEY" == sk-or-* ]] || { echo 'Set production environment secret OPENROUTER_API_KEY.' >&2; exit 1; }
 
       - uses: google-github-actions/auth@v2
         id: gcp-auth
@@ -63,21 +61,12 @@ jobs:
             --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
             --command="sudo bash /opt/latentsig-connect/deploy/gcp/deploy.sh /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz $PUBLIC_DOMAIN $GCP_BACKUP_BUCKET"
 
-      - name: Enable OCR and verify OpenRouter model
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      - name: Enable self-hosted OCR and verify MiniCPM
         run: |
           set -euo pipefail
-          key_file="$RUNNER_TEMP/openrouter-${GITHUB_RUN_ID}.key"
-          remote_key="/tmp/latentsig-openrouter-${GITHUB_RUN_ID}.key"
-          trap 'rm -f "$key_file"' EXIT
-          umask 077
-          printf '%s' "$OPENROUTER_API_KEY" > "$key_file"
-          gcloud compute scp "$key_file" "$GCP_VM_NAME:$remote_key" \
-            --tunnel-through-iap --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID"
           gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
             --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
-            --command="sudo chmod 600 $remote_key && sudo python3 /opt/latentsig-connect/deploy/gcp/runtime.py enable-ocr $remote_key && cd /opt/latentsig-connect && sudo docker compose --profile production up --build --wait --wait-timeout 240 --force-recreate -d backend integration-worker && sudo docker compose --profile production exec -T backend python -m app.cli verify-ocr"
+            --command="sudo python3 /opt/latentsig-connect/deploy/gcp/runtime.py enable-ocr && cd /opt/latentsig-connect && sudo docker compose --profile production up --build --wait --wait-timeout 1800 --force-recreate -d backend integration-worker && sudo docker compose --profile production exec -T backend python -m app.cli verify-ocr"
 
       - name: Verify public production endpoints
         run: |
@@ -90,4 +79,4 @@ jobs:
         run: |
           gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
             --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
-            --command="sudo rm -f /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz /tmp/latentsig-openrouter-${GITHUB_RUN_ID}.key"
+            --command="sudo rm -f /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz"

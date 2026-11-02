@@ -53,33 +53,26 @@ class DeploymentArchiveTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 extract_source(filename, Path(directory) / 'extracted')
 
-    def test_ocr_key_is_installed_privately_and_transfer_file_removed(self):
+    def test_gcp_ocr_selects_private_ollama_model_without_provider_key(self):
         with tempfile.TemporaryDirectory() as directory:
             secrets_dir = Path(directory) / 'secrets'
             secrets_dir.mkdir()
             environment = secrets_dir / 'production.env'
-            environment.write_text('OCR_ENABLED=false\nOPENROUTER_API_KEY=\nPUBLIC_DOMAIN=example.com\n')
-            key_file = Path(directory) / 'one-time-key'
-            key_file.write_text('sk-or-test-secret\n')
-            with patch.object(runtime, 'SECRETS', secrets_dir), patch('builtins.print') as output:
-                runtime.enable_ocr(key_file)
-            self.assertFalse(key_file.exists())
-            self.assertEqual(environment.read_text(), 'OCR_ENABLED=true\nOPENROUTER_API_KEY=sk-or-test-secret\nPUBLIC_DOMAIN=example.com\n')
+            environment.write_text('OCR_ENABLED=false\nOPENROUTER_API_KEY=old-key\nPUBLIC_DOMAIN=example.com\n')
+            with patch.object(runtime, 'SECRETS', secrets_dir):
+                runtime.enable_ocr()
+            self.assertEqual(environment.read_text(), 'OCR_ENABLED=true\nOPENROUTER_API_KEY=\nPUBLIC_DOMAIN=example.com\nOCR_PROVIDER=ollama\nOLLAMA_BASE_URL=http://ollama:11434\nOLLAMA_MODEL=openbmb/minicpm-ocr1.0\nOCR_TIMEOUT_SECONDS=85\nOCR_MAX_RETRIES=0\nCONSENT_NOTICE_VERSION=2026-11-02-v1\n')
             self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
-            self.assertNotIn('sk-or-test-secret', str(output.call_args))
 
-    def test_ocr_key_requires_exactly_one_setting_and_removes_transfer_file(self):
+    def test_gcp_ocr_config_rejects_duplicate_settings_without_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             secrets_dir = Path(directory) / 'secrets'
             secrets_dir.mkdir()
             environment = secrets_dir / 'production.env'
             original = 'OCR_ENABLED=false\nOPENROUTER_API_KEY=\nOPENROUTER_API_KEY=\n'
             environment.write_text(original)
-            key_file = Path(directory) / 'one-time-key'
-            key_file.write_text('sk-or-test-secret')
             with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
-                runtime.enable_ocr(key_file)
-            self.assertFalse(key_file.exists())
+                runtime.enable_ocr()
             self.assertEqual(environment.read_text(), original)
 
 
