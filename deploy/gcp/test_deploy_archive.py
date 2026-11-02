@@ -3,8 +3,10 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from extract_source import extract_source
+import runtime
 
 
 class DeploymentArchiveTests(unittest.TestCase):
@@ -50,6 +52,35 @@ class DeploymentArchiveTests(unittest.TestCase):
                 archive.addfile(link)
             with self.assertRaises(ValueError):
                 extract_source(filename, Path(directory) / 'extracted')
+
+    def test_ocr_key_is_installed_privately_and_transfer_file_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            environment.write_text('OCR_ENABLED=false\nOPENROUTER_API_KEY=\nPUBLIC_DOMAIN=example.com\n')
+            key_file = Path(directory) / 'one-time-key'
+            key_file.write_text('sk-or-test-secret\n')
+            with patch.object(runtime, 'SECRETS', secrets_dir), patch('builtins.print') as output:
+                runtime.enable_ocr(key_file)
+            self.assertFalse(key_file.exists())
+            self.assertEqual(environment.read_text(), 'OCR_ENABLED=true\nOPENROUTER_API_KEY=sk-or-test-secret\nPUBLIC_DOMAIN=example.com\n')
+            self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('sk-or-test-secret', str(output.call_args))
+
+    def test_ocr_key_requires_exactly_one_setting_and_removes_transfer_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            original = 'OCR_ENABLED=false\nOPENROUTER_API_KEY=\nOPENROUTER_API_KEY=\n'
+            environment.write_text(original)
+            key_file = Path(directory) / 'one-time-key'
+            key_file.write_text('sk-or-test-secret')
+            with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
+                runtime.enable_ocr(key_file)
+            self.assertFalse(key_file.exists())
+            self.assertEqual(environment.read_text(), original)
 
 
 if __name__ == '__main__':

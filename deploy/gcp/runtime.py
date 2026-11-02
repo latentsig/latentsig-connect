@@ -57,6 +57,38 @@ def change_domain(domain):
     print('Public origin settings updated. Rebuild the frontend and issue TLS before public use.')
 
 
+def enable_ocr(secret_file):
+    """Install a one-time transferred provider key without exposing it in logs or argv."""
+    secret_file = Path(secret_file)
+    try:
+        key = secret_file.read_text().strip()
+    finally:
+        # The workflow transfers this file only for the duration of this command.
+        secret_file.unlink(missing_ok=True)
+    if not key.startswith('sk-or-') or any(character in key for character in '\r\n\0'):
+        raise SystemExit('The supplied OpenRouter key is missing or malformed.')
+    path = SECRETS / 'production.env'
+    if not path.is_file():
+        raise SystemExit('Existing production.env is required to enable card scanning.')
+    replacements = {
+        b'OCR_ENABLED': b'true',
+        b'OPENROUTER_API_KEY': key.encode(),
+    }
+    counts = dict.fromkeys(replacements, 0)
+    updated = []
+    for line in path.read_bytes().splitlines(keepends=True):
+        content = line.rstrip(b'\r\n')
+        name, separator, _ = content.partition(b'=')
+        if separator and name in replacements:
+            counts[name] += 1
+            line = name + b'=' + replacements[name] + line[len(content):]
+        updated.append(line)
+    if any(count != 1 for count in counts.values()):
+        raise SystemExit('Expected exactly one OCR setting in production.env; environment unchanged.')
+    save(path, b''.join(updated))
+    print('Card scanning enabled with a private OpenRouter key.')
+
+
 def environment(domain):
     validate_domain(domain)
     SECRETS.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -138,5 +170,7 @@ if __name__ == '__main__':
         admins()
     elif sys.argv[1] == 'check-dns':
         check_dns()
+    elif sys.argv[1] == 'enable-ocr' and len(sys.argv) == 3:
+        enable_ocr(sys.argv[2])
     else:
-        raise SystemExit('Expected environment, domain, admins, or check-dns.')
+        raise SystemExit('Expected environment, domain, admins, check-dns, or enable-ocr KEY_FILE.')

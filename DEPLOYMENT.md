@@ -100,6 +100,20 @@ Each initial admin receives a different generated password only when the account
 
 Repeat the archive transfer and deploy command for subsequent releases. Use `sudoedit /srv/latentsig-connect/secrets/production.env` for runtime configuration, then redeploy. Use the explicit `runtime.py domain NEW_DOMAIN` command to change `PUBLIC_DOMAIN`, both frontend URL settings, and `GOOGLE_REDIRECT_URI` together. It preserves all other environment bytes and admin credentials and keeps the environment file at mode `0600`. Normal deployment refuses a mismatched domain. The frontend rebuild embeds the public origin in QR links. Do not delete Docker volumes or regenerate database credentials during a redeployment.
 
+### Deploy from GitHub Actions
+
+The repository provides a manually triggered **Deploy to GCP** workflow at `.github/workflows/deploy-gcp.yml`. It deploys only `main`, uses GitHub OIDC with GCP Workload Identity Federation (no service-account JSON key), transfers source through IAP, and enables OCR from a protected GitHub environment secret. It then recreates the API and integration worker, calls OpenRouter with a synthetic test card, and checks public HTTPS endpoints. The OCR check is a real provider request and may incur a small OpenRouter charge; it creates no lead and logs no extracted fields.
+
+Before the first run:
+
+1. Create a GitHub environment named `production` under **Settings → Environments**. Add secret `OPENROUTER_API_KEY` there (the value must be held in your password manager/secrets system; do not add it to this repository or a workflow file).
+2. Create a GCP Workload Identity Federation OIDC provider restricted to repository `latentsig/latentsig-connect`, ref `refs/heads/main`, and GitHub environment `production`. Map `google.subject=assertion.sub`, `attribute.repository=assertion.repository`, `attribute.ref=assertion.ref`, and `attribute.environment=assertion.environment`; set the provider condition to `assertion.repository == 'latentsig/latentsig-connect' && assertion.ref == 'refs/heads/main' && assertion.environment == 'production'`.
+3. Create or select a deployer service account in project `refined-outlet-249712`. Grant its identity `roles/iam.workloadIdentityUser` for the matching GitHub repository principal set. Grant it `roles/compute.viewer`, `roles/compute.osAdminLogin`, and `roles/iap.tunnelResourceAccessor` on the project. The VM must have OS Login enabled and permit IAP SSH as already required for operator access.
+4. In the GitHub `production` environment, add variables `GCP_WORKLOAD_IDENTITY_PROVIDER` (full provider resource name, `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER`) and `GCP_DEPLOYER_SERVICE_ACCOUNT` (deployer service-account email).
+5. Open **Actions → Deploy to GCP → Run workflow**, select `main`, then run it. Review the run summary; all steps must pass before using the site.
+
+The workflow expects the VM, persistent disk, backup bucket, DNS, and valid HTTPS certificate described above to already exist. It does not change DNS or create cloud infrastructure. If the workflow stops at its configuration preflight, add the missing environment variables/secret; if authentication fails, check the WIF provider condition and IAM grants. Provider failures are intentionally reported without exposing OpenRouter response content or the key.
+
 ### Enable HTTPS and verify
 
 The temporary hostname already resolves to `34.93.221.72`. Until a certificate is issued, Nginx returns its certificate bootstrap response and the app is not publicly usable. The issuance command checks that DNS resolves only to the VM's public IP:
