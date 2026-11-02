@@ -10,7 +10,7 @@ class VisionClientTests(unittest.TestCase):
     def setUp(self):
         self.original = {name: getattr(settings, name) for name in (
             "openrouter_api_key", "openrouter_base_url", "openrouter_model", "ocr_enabled",
-            "ocr_timeout_seconds", "ocr_max_output_tokens",
+            "ocr_timeout_seconds", "ocr_max_output_tokens", "ocr_provider", "ollama_base_url", "ollama_model",
         )}
         settings.openrouter_api_key = "test-key"
         settings.openrouter_base_url = "https://openrouter.ai/api/v1"
@@ -86,6 +86,32 @@ class VisionClientTests(unittest.TestCase):
         self.assertIsNone(result.address)
         self.assertTrue(result.warnings)
         self.assertEqual(len(result.warnings), 1)
+
+    def test_gcp_ollama_uses_mounted_minicpm_model_and_structured_image_input(self):
+        result_body = {"message": {"content": json.dumps({
+            "full_name": "Alex Example", "company": "Example Company", "job_title": "Engineer",
+            "email": "alex@example.invalid", "phone": None, "website": None, "address": None,
+            "is_template": False, "warnings": [], "uncertain_fields": [],
+        })}}
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self): return json.dumps(result_body).encode()
+
+        settings.ocr_provider = "ollama"
+        settings.ollama_base_url = "http://ollama:11434"
+        settings.ollama_model = "openbmb/minicpm-ocr1.0"
+        with patch("app.services.vision.client.urlopen", return_value=Response()) as open_url:
+            result = _request([(b"synthetic-image", "image/jpeg")])
+        request = open_url.call_args.args[0]
+        sent = json.loads(request.data)
+        self.assertEqual(request.full_url, "http://ollama:11434/api/chat")
+        self.assertEqual(sent["model"], "openbmb/minicpm-ocr1.0")
+        self.assertEqual(sent["messages"][1]["images"], ["c3ludGhldGljLWltYWdl"])
+        self.assertEqual(sent["format"]["type"], "object")
+        self.assertIsNone(request.get_header("Authorization"))
+        self.assertEqual(result.full_name, "Alex Example")
 
 
 if __name__ == "__main__":

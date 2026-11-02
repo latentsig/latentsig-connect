@@ -57,6 +57,37 @@ def change_domain(domain):
     print('Public origin settings updated. Rebuild the frontend and issue TLS before public use.')
 
 
+def enable_ocr():
+    """Select the self-hosted MiniCPM model and turn on card scanning."""
+    path = SECRETS / 'production.env'
+    if not path.is_file():
+        raise SystemExit('Existing production.env is required to enable card scanning.')
+    replacements = {
+        b'OCR_ENABLED': b'true', b'OCR_PROVIDER': b'ollama',
+        b'OLLAMA_BASE_URL': b'http://ollama:11434',
+        b'OLLAMA_MODEL': b'openbmb/minicpm-ocr1.0',
+        b'OCR_TIMEOUT_SECONDS': b'85', b'OCR_MAX_RETRIES': b'0',
+        b'CONSENT_NOTICE_VERSION': b'2026-11-02-v1',
+        b'OPENROUTER_API_KEY': b'',
+    }
+    counts = dict.fromkeys(replacements, 0)
+    updated = []
+    for line in path.read_bytes().splitlines(keepends=True):
+        content = line.rstrip(b'\r\n')
+        name, separator, _ = content.partition(b'=')
+        if separator and name in replacements:
+            counts[name] += 1
+            line = name + b'=' + replacements[name] + line[len(content):]
+        updated.append(line)
+    if any(count > 1 for count in counts.values()):
+        raise SystemExit('Duplicate OCR setting in production.env; environment unchanged.')
+    for name, count in counts.items():
+        if count == 0:
+            updated.append(name + b'=' + replacements[name] + b'\n')
+    save(path, b''.join(updated))
+    print('Card scanning enabled with the self-hosted MiniCPM-OCR model; no provider key is used.')
+
+
 def environment(domain):
     validate_domain(domain)
     SECRETS.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -80,8 +111,11 @@ def environment(domain):
         'FRONTEND_URLS': f'https://{domain}',
         'GOOGLE_REDIRECT_URI': f'https://{domain}/api/v1/auth/google/callback',
         'ADMIN_EMAIL_ALLOWLIST': 'raksha@latentsig.com,bhoomika@latentsig.com,bharat@latentsig.com,info@latentsig.com,shauryasharthak@latentsig.com',
-        'INITIAL_ADMIN_EMAILS': ','.join(ADMINS), 'OCR_ENABLED': 'false',
-        'OPENROUTER_API_KEY': '', 'CONSENT_NOTICE_VERSION': '2026-10-21-v1',
+        'INITIAL_ADMIN_EMAILS': ','.join(ADMINS), 'OCR_ENABLED': 'true',
+        'OCR_PROVIDER': 'ollama', 'OLLAMA_BASE_URL': 'http://ollama:11434',
+        'OLLAMA_MODEL': 'openbmb/minicpm-ocr1.0', 'OCR_TIMEOUT_SECONDS': '85',
+        'OCR_MAX_RETRIES': '0', 'CONSENT_NOTICE_VERSION': '2026-11-02-v1',
+        'OPENROUTER_API_KEY': '',
     }
     save(path, ''.join(f'{key}={value}\n' for key, value in values.items()))
     print('Created private production environment.')
@@ -138,5 +172,7 @@ if __name__ == '__main__':
         admins()
     elif sys.argv[1] == 'check-dns':
         check_dns()
+    elif sys.argv[1] == 'enable-ocr' and len(sys.argv) == 2:
+        enable_ocr()
     else:
-        raise SystemExit('Expected environment, domain, admins, or check-dns.')
+        raise SystemExit('Expected environment, domain, admins, check-dns, or enable-ocr.')

@@ -1,0 +1,82 @@
+name: Deploy to GCP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-gcp
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_PROJECT_ID: refined-outlet-249712
+      GCP_VM_NAME: latentsig-connect
+      GCP_ZONE: asia-south1-b
+      GCP_BACKUP_BUCKET: refined-outlet-249712-latentsig-connect-backups
+      PUBLIC_DOMAIN: latentsig-connect.34.93.221.72.sslip.io
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate protected deployment configuration
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOYER_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Deployments must run from main.' >&2; exit 1; }
+          [[ -n "$WIF_PROVIDER" ]] || { echo 'Set production environment variable GCP_WORKLOAD_IDENTITY_PROVIDER.' >&2; exit 1; }
+          [[ "$DEPLOYER_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]] || { echo 'Set production environment variable GCP_DEPLOYER_SERVICE_ACCOUNT.' >&2; exit 1; }
+
+      - uses: google-github-actions/auth@v2
+        id: gcp-auth
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: refined-outlet-249712
+
+      - name: Package committed source
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/latentsig-connect.tar.gz" HEAD
+
+      - name: Deploy application through IAP
+        run: |
+          set -euo pipefail
+          gcloud compute scp "$RUNNER_TEMP/latentsig-connect.tar.gz" \
+            "$GCP_VM_NAME:/tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz" \
+            --tunnel-through-iap --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID"
+          gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
+            --command="sudo bash /opt/latentsig-connect/deploy/gcp/deploy.sh /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz $PUBLIC_DOMAIN $GCP_BACKUP_BUCKET"
+
+      - name: Enable self-hosted OCR and verify MiniCPM
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
+            --command="sudo python3 /opt/latentsig-connect/deploy/gcp/runtime.py enable-ocr && cd /opt/latentsig-connect && sudo docker compose --profile production up --build --wait --wait-timeout 1800 --force-recreate -d backend integration-worker && sudo docker compose --profile production exec -T backend python -m app.cli verify-ocr"
+
+      - name: Verify public production endpoints
+        run: |
+          set -euo pipefail
+          python3 deploy/gcp/smoke.py "https://$PUBLIC_DOMAIN" --public-only
+
+      - name: Remove temporary deployment files from VM
+        if: always() && steps.gcp-auth.outcome == 'success'
+        continue-on-error: true
+        run: |
+          gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
+            --command="sudo rm -f /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz"

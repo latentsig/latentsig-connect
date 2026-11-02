@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "google/gemini-3.8-flash"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "openbmb/minicpm-ocr1.0"
     ocr_provider: str = "openrouter"
     ocr_timeout_seconds: int = 20
     ocr_max_retries: int = 2
@@ -72,8 +74,8 @@ class Settings(BaseSettings):
             raise ValueError("OCR_MAX_RETRIES must be between 0 and 5.")
         if self.ocr_max_output_tokens < 100 or self.ocr_max_output_tokens > 4000:
             raise ValueError("OCR_MAX_OUTPUT_TOKENS must be between 100 and 4000.")
-        if self.ocr_provider.lower() != "openrouter":
-            raise ValueError("OCR_PROVIDER must be openrouter.")
+        if self.ocr_provider.lower() not in {"ollama", "openrouter"}:
+            raise ValueError("OCR_PROVIDER must be ollama or openrouter.")
         if self.app_env.lower() == "production":
             if self.app_secret.strip().lower() in {
                 "local-development-only", "replace-this-before-deployment", "replace-with-generated-random-value",
@@ -95,8 +97,10 @@ class Settings(BaseSettings):
                 raise ValueError("Production requires an explicit admin allowlist and initial admin list.")
             if not self.initial_admins.issubset(self.admin_emails):
                 raise ValueError("Every initial admin must also be in ADMIN_EMAIL_ALLOWLIST.")
-            if self.ocr_enabled and not self.openrouter_api_key:
+            if self.ocr_enabled and self.ocr_provider.lower() == "openrouter" and not self.openrouter_api_key:
                 raise ValueError("OPENROUTER_API_KEY is required when OCR_ENABLED is true in production.")
+            if self.ocr_enabled and self.ocr_provider.lower() == "ollama" and not self.ollama_base_url.startswith(("http://", "https://")):
+                raise ValueError("OLLAMA_BASE_URL must be an HTTP(S) URL when OCR_PROVIDER is ollama.")
         return self
 
 

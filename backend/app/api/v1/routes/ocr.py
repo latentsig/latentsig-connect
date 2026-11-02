@@ -69,7 +69,7 @@ async def read_business_card(files: list[UploadFile] = File(default=[]), file: U
             data_by_side.append((side, upload, data, mime_type))
         if not ai_processing_consent:
             raise HTTPException(status_code=422, detail="Please agree to AI processing of your card image before scanning it.")
-        # Decode each image locally to reject malformed or oversized pixel payloads before upload to the vision provider.
+        # Decode each image locally before sending it to the configured OCR service.
         prepared_images = [await run_in_threadpool(decode_and_prepare, item[2]) for item in data_by_side]
         result = await run_in_threadpool(_extract, [(image, "image/jpeg") for image in prepared_images])
         consent_at = datetime.now(timezone.utc).isoformat()

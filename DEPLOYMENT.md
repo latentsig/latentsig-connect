@@ -18,7 +18,7 @@ For the planned production origin `https://connect.latentsig.com`, generate a ro
 ./scripts/Initialize-Production.ps1 -PublicUrl https://connect.latentsig.com -AdminEmail bhoomika@latentsig.com -AdditionalAdminEmails bharat@latentsig.com
 ```
 
-The script configures Bhoomika as the initial admin and puts both Bhoomika and Bharat in `ADMIN_EMAIL_ALLOWLIST`. OCR starts disabled until an OpenRouter key is securely configured in `.env`. Never copy credentials into source files or chat. `deploy/production.env.example` documents the configurable production settings without secrets.
+The script configures Bhoomika as the initial admin and puts both Bhoomika and Bharat in `ADMIN_EMAIL_ALLOWLIST`. OCR settings are documented in `deploy/production.env.example`. Never copy credentials into source files or chat.
 
 ## VPS deployment with Nginx and HTTPS
 
@@ -41,7 +41,7 @@ From the repository directory on the VPS:
    ```
 
    Passwords are hashed with salted scrypt. Login is rate-limited, limited to the configured allowlist, and issued in secure HTTP-only session cookies. Development email-only sign-in is unavailable when `APP_ENV=production`.
-5. For hosted card extraction, set `OPENROUTER_API_KEY` using the deployment secret mechanism and set `OCR_ENABLED=true`; the backend validates that production configuration at startup. Use a synthetic card for a smoke test after deployment and consent review.
+5. The production Compose profile runs self-hosted MiniCPM-OCR through Ollama. Its model weights are downloaded into a persistent Docker volume; no OpenRouter key is needed. Use a synthetic card for a smoke test after deployment and consent review.
 6. Schedule `sh scripts/renew-tls-certificate.sh` or `Renew-TlsCertificate.ps1` daily. It checks renewal and reloads Nginx. Keep an external copy of PostgreSQL backups and test a restore before relying on them.
 
 Google Sheets remains optional until service-account access and a sheet ID are configured. Production requires PostgreSQL, Redis, HTTPS frontend origins, a unique app secret, and explicit admin allowlists.
@@ -94,11 +94,25 @@ sudo bash /tmp/latentsig-connect-deployer/deploy/gcp/deploy.sh /tmp/latentsig-co
 
 For the first bootstrap of a just-created blank GCP disk, replace the first command with `sudo bash /tmp/bootstrap.sh --new-disk`. Run the default command on later bootstraps or disks whose history is unknown.
 
-The deploy script validates the source archive, preserves `.env`, builds the existing production profile, waits for healthy containers, and installs daily systemd timers. It generates unique application and database secrets only on the first deployment. The environment file is `/srv/latentsig-connect/secrets/production.env`, owned by root with mode `0600`. The repository `.env` is a symlink to it. It contains the full explicit allowlist from `backend/.env.example`, with Bharat and Bhoomika as initial admins. OCR remains disabled until an operator securely configures an OpenRouter key.
+The deploy script validates the source archive, preserves `.env`, builds the production profile, waits for PostgreSQL, Redis, the app, and the self-hosted OCR model to become healthy, and installs daily systemd timers. It generates unique application and database secrets only on the first deployment. The environment file is `/srv/latentsig-connect/secrets/production.env`, owned by root with mode `0600`. The repository `.env` is a symlink to it. It contains the full explicit allowlist from `backend/.env.example`, with Bharat and Bhoomika as initial admins. OCR uses the MiniCPM model inside the VM and needs no inference API key.
 
 Each initial admin receives a different generated password only when the account has no password. The CLI receives passwords through standard input, and its output is captured. Existing passwords survive redeployments. Bootstrap credentials are stored in `/srv/latentsig-connect/secrets/admin-passwords.json` with mode `0600`. Retrieve them through a private operator session or password manager. Do not paste them into logs, source control, tickets, or chat. A password changed later through the CLI does not update this bootstrap file.
 
 Repeat the archive transfer and deploy command for subsequent releases. Use `sudoedit /srv/latentsig-connect/secrets/production.env` for runtime configuration, then redeploy. Use the explicit `runtime.py domain NEW_DOMAIN` command to change `PUBLIC_DOMAIN`, both frontend URL settings, and `GOOGLE_REDIRECT_URI` together. It preserves all other environment bytes and admin credentials and keeps the environment file at mode `0600`. Normal deployment refuses a mismatched domain. The frontend rebuild embeds the public origin in QR links. Do not delete Docker volumes or regenerate database credentials during a redeployment.
+
+### Deploy from GitHub Actions
+
+The repository provides a manually triggered **Deploy to GCP** workflow at `.github/workflows/deploy-gcp.yml`. It deploys only `main`, uses GitHub OIDC with GCP Workload Identity Federation (no service-account JSON key), transfers source through IAP, starts the self-hosted Ollama service, downloads MiniCPM-OCR into a persistent private volume, and enables OCR in FastAPI. It then sends a synthetic test card to the local model and checks public HTTPS endpoints. No OpenRouter key or third-party inference API is used; GCP VM compute and storage charges still apply.
+
+Before the first run:
+
+1. Create a GitHub environment named `production` under **Settings → Environments**. No OCR API secret is required.
+2. Create a GCP Workload Identity Federation OIDC provider restricted to repository `latentsig/latentsig-connect`, ref `refs/heads/main`, and GitHub environment `production`. Map `google.subject=assertion.sub`, `attribute.repository=assertion.repository`, `attribute.ref=assertion.ref`, and `attribute.environment=assertion.environment`; set the provider condition to `assertion.repository == 'latentsig/latentsig-connect' && assertion.ref == 'refs/heads/main' && assertion.environment == 'production'`.
+3. Create or select a deployer service account in project `refined-outlet-249712`. Grant its identity `roles/iam.workloadIdentityUser` for the matching GitHub repository principal set. Grant it `roles/compute.viewer`, `roles/compute.osAdminLogin`, and `roles/iap.tunnelResourceAccessor` on the project. The VM must have OS Login enabled and permit IAP SSH as already required for operator access.
+4. In the GitHub `production` environment, add variables `GCP_WORKLOAD_IDENTITY_PROVIDER` (full provider resource name, `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER`) and `GCP_DEPLOYER_SERVICE_ACCOUNT` (deployer service-account email).
+5. Open **Actions → Deploy to GCP → Run workflow**, select `main`, then run it. Review the run summary; all steps must pass before using the site.
+
+The workflow expects the VM, persistent disk, backup bucket, DNS, and valid HTTPS certificate described above to already exist. It does not change DNS or create cloud infrastructure. The first deployment downloads about 1.4 GB of model weights and can take several minutes; later deployments reuse the persistent model volume. If the workflow stops at its configuration preflight, add the missing environment variables; if authentication fails, check the WIF provider condition and IAM grants. OCR stays on the VM's private Docker network. The model is Apache-2.0 licensed; the VM still incurs normal GCP costs.
 
 ### Enable HTTPS and verify
 

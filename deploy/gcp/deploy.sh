@@ -22,7 +22,7 @@ printf 'BACKUP_BUCKET=%s\n' "$bucket" > /etc/latentsig-connect.conf
 chmod 600 /etc/latentsig-connect.conf
 export COMPOSE_PROJECT_NAME=latentsig-connect
 docker compose --profile production config --quiet
-docker compose --profile production up --build --wait --wait-timeout 240 -d
+docker compose --profile production up --build --wait --wait-timeout 1800 -d
 python3 deploy/gcp/runtime.py admins
 bash deploy/gcp/operations.sh install-timers
 echo 'Stack started. Run issue-tls after DNS points at this VM.'

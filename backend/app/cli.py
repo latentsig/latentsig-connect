@@ -1,12 +1,16 @@
 import argparse
+from io import BytesIO
 from getpass import getpass
 
+from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.db.models import AuditLog, User
 from app.db.session import SessionLocal
 from app.core.passwords import hash_password
+from app.services.vision.client import extract_card
+from app.services.vision.exceptions import VisionConfigurationError, VisionUnavailable
 
 
 def grant_admin(email: str) -> None:
@@ -56,6 +60,28 @@ def set_password(email: str) -> None:
     print(f"Password set for {normalized_email}.")
 
 
+def verify_ocr() -> None:
+    """Exercise configured provider/model using synthetic data; never print its response."""
+    image = Image.new("RGB", (1000, 520), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((24, 24, 976, 496), outline="#183153", width=5)
+    font = ImageFont.load_default(size=38)
+    draw.text((65, 80), "LATENTSIG  |  SYNTHETIC TEST CARD", fill="#183153", font=font)
+    draw.text((65, 180), "Alex Example", fill="#101820", font=font)
+    draw.text((65, 245), "Quality Engineer", fill="#101820", font=font)
+    draw.text((65, 310), "Example Test Company", fill="#101820", font=font)
+    draw.text((65, 375), "ocr-smoke@example.invalid", fill="#101820", font=font)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    try:
+        result = extract_card([(buffer.getvalue(), "image/png")])
+    except (VisionConfigurationError, VisionUnavailable):
+        raise SystemExit("OCR smoke test failed. Check the configured provider and model availability.") from None
+    if result.is_template:
+        raise SystemExit("OCR smoke test returned an unexpected template classification.")
+    print("OCR smoke test passed. Synthetic image only; no lead was created and no extracted data was logged.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -63,11 +89,14 @@ def main() -> None:
     admin.add_argument("email")
     password = commands.add_parser("set-password", help="Set an allowlisted team account password interactively")
     password.add_argument("email")
+    commands.add_parser("verify-ocr", help="Verify card extraction with synthetic data")
     args = parser.parse_args()
     if args.command == "grant-admin":
         grant_admin(args.email)
     elif args.command == "set-password":
         set_password(args.email)
+    elif args.command == "verify-ocr":
+        verify_ocr()
 
 
 if __name__ == "__main__":
