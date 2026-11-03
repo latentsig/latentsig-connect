@@ -169,7 +169,7 @@ function CardUpload() {
       const response = await fetch(`${apiBase}/api/v1/ocr/business-card`, { method: 'POST', body })
       if (!response.ok) {
         const payload = await response.json().catch(() => ({})) as { detail?: string }
-        throw new Error(payload.detail || 'Local card scanning could not read this image. You can enter your details manually instead.')
+        throw new Error(payload.detail || 'The card scanning service could not read this image. You can enter your details manually instead.')
       }
       const result = await response.json(); sessionStorage.setItem('latentsig-card-draft', JSON.stringify(result)); navigate(withAttribution('/connect/card/review'))
     } catch (e) {
@@ -188,10 +188,10 @@ function CardUpload() {
 
   return <PageFrame compact>
     <Link to={withAttribution('/connect')} className="back-link"><ArrowLeft size={16}/> Back</Link>
-    <div className="form-heading"><div className="step-label">01 <span/> BUSINESS CARD</div><h1>Let your card<br className="mobile-break"/> do the talking.</h1><p>We?ll pick out your details for you to review before sharing.</p></div>
+    <div className="form-heading"><div className="step-label">01 <span/> BUSINESS CARD</div><h1>Let your card<br className="mobile-break"/> do the talking.</h1><p>We'll pick out your details for you to review before sharing.</p></div>
     <div className="upload-panel">
       <div className="upload-art"><div className="art-orbit orbit-one"/><div className="art-orbit orbit-two"/><div className="card-illustration"><span/><span/><span/><i/></div><div className="spark spark-one">?</div><div className="spark spark-two">?</div></div>
-      <div className="upload-prompt"><strong>Take a photo of your business card</strong><span>Upload the front and, if available, the back. We’ll read both together.</span></div>
+      <div className="upload-prompt"><strong>Take a photo of your business card</strong><span>Upload the front and, if available, the back. We'll read both together.</span></div>
       <input ref={cameraInput} className="file-input" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={onFile('front')}/>
       <input ref={uploadInput} className="file-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={onFile('front')}/>
       <input ref={backCameraInput} className="file-input" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" onChange={onFile('back')}/>
@@ -199,12 +199,13 @@ function CardUpload() {
       <div className="card-side"><b>Front of card <em>*</em></b>{frontFile ? <div className="selected-file"><span>{frontFile.name}</span><button type="button" onClick={() => {setFrontFile(null);setError('')}}>Remove</button></div> : <div className="card-upload-actions"><button type="button" className="primary-button" onClick={() => cameraInput.current?.click()}><ScanLine size={18}/> Take Photo</button><button type="button" className="upload-secondary" onClick={() => uploadInput.current?.click()}><Upload size={17}/> Upload Image</button></div>}</div>
       <div className="card-side"><b>Back of card <small>OPTIONAL</small></b>{backFile ? <div className="selected-file"><span>{backFile.name}</span><button type="button" onClick={() => {setBackFile(null);setError('')}}>Remove</button></div> : <div className="card-upload-actions"><button type="button" className="upload-secondary" onClick={() => backCameraInput.current?.click()}><ScanLine size={18}/> Take Photo</button><button type="button" className="upload-secondary" onClick={() => backUploadInput.current?.click()}><Upload size={17}/> Upload Image</button></div>}</div>
       <small className="upload-format">JPG, PNG, WEBP · max 10 MB per side</small>
-      <label className="consent ai-consent"><input type="checkbox" checked={aiProcessingConsent} onChange={event => setAiProcessingConsent(event.target.checked)} /><span>I agree LatentSig may process this card image with its configured AI scanner to extract my contact details.</span></label>
+      <label className="consent ai-consent"><input type="checkbox" checked={aiProcessingConsent} onChange={event => setAiProcessingConsent(event.target.checked)} /><span>I agree LatentSig may process this card image with its selected AI service to extract my contact details. If a hosted service is selected, this may send the image to an external provider.</span></label>
       {error && <div className="api-error" role="alert">{error}</div>}
       {frontFile && <button className="primary-button scan-submit" onClick={upload} disabled={busy}>{busy ? 'Reading your card…' : 'Scan business card'}<ArrowRight size={18}/></button>}
-      <button className="text-button" onClick={() => navigate(withAttribution('/connect/manual'))}>I?ll enter my details instead <ChevronRight size={16}/></button>
+      {busy && <p role="status" aria-live="polite">Keep this page open while we read your card.</p>}
+      <button className="text-button" onClick={() => navigate(withAttribution('/connect/manual'))}>I'll enter my details instead <ChevronRight size={16}/></button>
     </div>
-    <p className="secure-caption"><LockKeyhole size={14}/> Production scans run on LatentSig’s self-hosted MiniCPM-OCR service. Manual entry does not send a card image.</p>
+    <p className="secure-caption"><LockKeyhole size={14}/> LatentSig's selected AI service may be hosted by an external provider. If so, that provider receives your card image. Review extracted details before submitting. Manual entry does not send a card image.</p>
   </PageFrame>
 }
 

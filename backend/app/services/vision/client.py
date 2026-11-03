@@ -10,7 +10,9 @@ from pydantic import ValidationError
 from app.core.config import settings
 from app.services.vision.exceptions import VisionConfigurationError, VisionUnavailable
 from app.services.vision.prompts import SYSTEM_PROMPT
+from app.services.vision.minicpm import parse_transcription, prepare_image
 from app.services.vision.schemas import CardExtraction
+from app.services.vision.vertex import build_request as build_vertex_request
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,8 @@ _JSON_SCHEMA = {
 }
 
 
-def _request(images: list[tuple[bytes, str]]) -> CardExtraction:
+def _request(images: list[tuple[bytes, str]], deadline: float | None = None) -> CardExtraction:
+    deadline = deadline if deadline is not None else time.monotonic() + settings.ocr_timeout_seconds
     if not settings.ocr_enabled:
         raise VisionConfigurationError("Business-card scanning is disabled.")
     provider = settings.ocr_provider.lower()
@@ -39,14 +42,14 @@ def _request(images: list[tuple[bytes, str]]) -> CardExtraction:
         base = settings.ollama_base_url.rstrip("/")
         if not base.startswith(("http://", "https://")):
             raise VisionConfigurationError("Ollama base URL must use HTTP or HTTPS.")
-        messages: list[dict[str, object]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "Extract contact details from these card image(s).", "images": [base64.b64encode(image).decode("ascii") for image, _ in images]},
-        ]
+        image = prepare_image(images)
         payload = {
-            "model": settings.ollama_model, "messages": messages, "stream": False,
-            "format": _JSON_SCHEMA,
-            "options": {"temperature": 0, "num_predict": settings.ocr_max_output_tokens, "num_ctx": 4096},
+            "model": settings.ollama_model,
+            "messages": [{"role": "user", "content": "Text Recognition:",
+                          "images": [base64.b64encode(image).decode("ascii")]}],
+            "stream": False, "think": False, "keep_alive": "30m",
+            "options": {"temperature": 0, "num_predict": settings.ocr_max_output_tokens,
+                        "num_ctx": 8192, "num_thread": 2},
         }
         endpoint = f"{base}/api/chat"
         response_path = "ollama"
@@ -70,13 +73,37 @@ def _request(images: list[tuple[bytes, str]]) -> CardExtraction:
         endpoint = f"{base}/chat/completions"
         headers.update({"Authorization": f"Bearer {settings.openrouter_api_key}", "HTTP-Referer": settings.frontend_url, "X-Title": "LatentSig Connect"})
         response_path = "openrouter"
+    elif provider == "vertex":
+        request = build_vertex_request(images, deadline)
+        response_path = "vertex"
     else:
         raise VisionConfigurationError("Business-card scanning provider is not supported.")
-    request = Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    if provider != "vertex":
+        request = Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     try:
-        with urlopen(request, timeout=settings.ocr_timeout_seconds) as response:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        with urlopen(request, timeout=remaining) as response:
             body = json.loads(response.read())
-        text = body["message"]["content"] if response_path == "ollama" else body["choices"][0]["message"]["content"]
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        if response_path == "ollama":
+            metrics = {key: body[key] for key in ("prompt_eval_count", "eval_count", "prompt_eval_duration", "eval_duration")
+                       if isinstance(body.get(key), (int, float))}
+            logger.info("OCR model completed: provider=ollama metrics=%s", metrics)
+            if body.get("done") is not True or body.get("done_reason") != "stop":
+                raise ValueError("OCR transcription was incomplete.")
+            return parse_transcription(body["message"]["content"])
+        if response_path == "vertex":
+            candidate = body["candidates"][0]
+            if candidate.get("finishReason") != "STOP":
+                raise ValueError("OCR extraction was incomplete.")
+            text = "".join(part.get("text", "") for part in candidate["content"]["parts"] if not part.get("thought"))
+        else:
+            if body["choices"][0].get("finish_reason") == "length":
+                raise ValueError("OCR extraction was incomplete.")
+            text = body["choices"][0]["message"]["content"]
         if isinstance(text, list):
             text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
         parsed = CardExtraction.model_validate_json(text)
@@ -94,19 +121,32 @@ def _request(images: list[tuple[bytes, str]]) -> CardExtraction:
         # Do not log provider response bodies: they may contain submitted data.
         logger.warning("OCR provider request failed with HTTP status %s", exc.code)
         raise VisionUnavailable from None
-    except (URLError, TimeoutError, OSError, KeyError, IndexError, TypeError, ValueError, ValidationError):
+    except TimeoutError:
+        logger.warning("OCR provider request failed: provider=%s reason=timeout", provider)
+        raise VisionUnavailable from None
+    except (URLError, OSError, KeyError, IndexError, TypeError, ValueError, ValidationError):
         raise VisionUnavailable from None
 
 
 def extract_card(images: list[tuple[bytes, str]]) -> CardExtraction:
     last_error = None
+    started = time.monotonic()
+    deadline = started + settings.ocr_timeout_seconds
     for attempt in range(settings.ocr_max_retries + 1):
         try:
-            return _request(images)
+            result = _request(images, deadline)
+            logger.info("OCR provider request completed: provider=%s image_count=%s elapsed_seconds=%.2f reason=success",
+                        settings.ocr_provider, len(images), time.monotonic() - started)
+            return result
         except VisionConfigurationError:
             raise
         except VisionUnavailable as exc:
             last_error = exc
             if attempt < settings.ocr_max_retries:
-                time.sleep(min(0.25 * (2 ** attempt), 1.0))
+                delay = min(0.25 * (2 ** attempt), 1.0)
+                if time.monotonic() + delay >= deadline:
+                    break
+                time.sleep(delay)
+    logger.warning("OCR provider request failed: provider=%s image_count=%s elapsed_seconds=%.2f reason=unavailable",
+                   settings.ocr_provider, len(images), time.monotonic() - started)
     raise last_error or VisionUnavailable
