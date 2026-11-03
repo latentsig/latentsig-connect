@@ -61,12 +61,12 @@ jobs:
             --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
             --command="sudo bash /opt/latentsig-connect/deploy/gcp/deploy.sh /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz $PUBLIC_DOMAIN $GCP_BACKUP_BUCKET"
 
-      - name: Enable self-hosted OCR and verify MiniCPM
+      - name: Verify configured OCR provider
         run: |
           set -euo pipefail
           gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
             --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
-            --command="sudo python3 /opt/latentsig-connect/deploy/gcp/runtime.py enable-ocr && cd /opt/latentsig-connect && sudo docker compose --profile production up --build --wait --wait-timeout 1800 --force-recreate -d backend integration-worker && sudo docker compose --profile production exec -T backend python -m app.cli verify-ocr"
+            --command="sudo sh -c 'cd /opt/latentsig-connect && docker compose --profile production exec -T backend python -m app.cli verify-ocr'"
 
       - name: Verify public production endpoints
         run: |

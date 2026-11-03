@@ -1,6 +1,9 @@
 import argparse
 from io import BytesIO
 from getpass import getpass
+from urllib.parse import urlsplit, urlunsplit
+
+import phonenumbers
 
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import select
@@ -62,23 +65,37 @@ def set_password(email: str) -> None:
 
 def verify_ocr() -> None:
     """Exercise configured provider/model using synthetic data; never print its response."""
-    image = Image.new("RGB", (1000, 520), "white")
+    image = Image.new("RGB", (1000, 620), "white")
     draw = ImageDraw.Draw(image)
-    draw.rectangle((24, 24, 976, 496), outline="#183153", width=5)
-    font = ImageFont.load_default(size=38)
-    draw.text((65, 80), "LATENTSIG  |  SYNTHETIC TEST CARD", fill="#183153", font=font)
-    draw.text((65, 180), "Alex Example", fill="#101820", font=font)
-    draw.text((65, 245), "Quality Engineer", fill="#101820", font=font)
-    draw.text((65, 310), "Example Test Company", fill="#101820", font=font)
-    draw.text((65, 375), "ocr-smoke@example.invalid", fill="#101820", font=font)
+    font = ImageFont.load_default(size=44)
+    lines = ["Mira Sen", "Quality Engineer", "Northstar Systems", "mira@northstar.example.com",
+             "+1 415 555 2671", "www.northstar.example.com"]
+    for index, line in enumerate(lines):
+        draw.text((45, 45 + index * 84), line, fill="black", font=font)
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     try:
         result = extract_card([(buffer.getvalue(), "image/png")])
     except (VisionConfigurationError, VisionUnavailable):
         raise SystemExit("OCR smoke test failed. Check the configured provider and model availability.") from None
-    if result.is_template:
-        raise SystemExit("OCR smoke test returned an unexpected template classification.")
+    expected = {
+        "full_name": "Mira Sen", "company": "Northstar Systems", "job_title": "Quality Engineer",
+        "email": "mira@northstar.example.com", "phone": "+14155552671",
+        "website": "https://www.northstar.example.com", "address": None, "is_template": False,
+    }
+    actual = result.model_dump()
+    if result.phone:
+        try:
+            phone = phonenumbers.parse(result.phone, settings.default_phone_region)
+            actual["phone"] = phonenumbers.format_number(phone, phonenumbers.PhoneNumberFormat.E164)
+        except phonenumbers.NumberParseException:
+            pass
+    if result.website:
+        website = urlsplit(result.website if "://" in result.website else "https://" + result.website)
+        actual["website"] = urlunsplit(("https", website.netloc.lower(), website.path.rstrip("/"), website.query, website.fragment))
+    mismatches = [field for field, value in expected.items() if actual[field] != value]
+    if mismatches:
+        raise SystemExit("OCR smoke test failed field checks: " + ", ".join(mismatches))
     print("OCR smoke test passed. Synthetic image only; no lead was created and no extracted data was logged.")
 
 

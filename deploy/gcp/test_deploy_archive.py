@@ -1,7 +1,9 @@
 import io
+from contextlib import redirect_stdout
 from pathlib import Path
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -53,27 +55,288 @@ class DeploymentArchiveTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 extract_source(filename, Path(directory) / 'extracted')
 
-    def test_gcp_ocr_selects_private_ollama_model_without_provider_key(self):
+    def test_ollama_selection_preserves_hosted_key_and_unrelated_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             secrets_dir = Path(directory) / 'secrets'
             secrets_dir.mkdir()
             environment = secrets_dir / 'production.env'
-            environment.write_text('OCR_ENABLED=false\nOPENROUTER_API_KEY=old-key\nPUBLIC_DOMAIN=example.com\n')
+            environment.write_bytes(
+                b'# keep this comment\r\nOCR_ENABLED=false\r\n'
+                b'OPENROUTER_API_KEY=existing-secret\r\nPUBLIC_DOMAIN=example.com\r\n'
+                b'CONSENT_NOTICE_VERSION=older-v1\r\n')
             with patch.object(runtime, 'SECRETS', secrets_dir):
-                runtime.enable_ocr()
-            self.assertEqual(environment.read_text(), 'OCR_ENABLED=true\nOPENROUTER_API_KEY=\nPUBLIC_DOMAIN=example.com\nOCR_PROVIDER=ollama\nOLLAMA_BASE_URL=http://ollama:11434\nOLLAMA_MODEL=openbmb/minicpm-ocr1.0\nOCR_TIMEOUT_SECONDS=85\nOCR_MAX_RETRIES=0\nCONSENT_NOTICE_VERSION=2026-11-02-v1\n')
+                runtime.select_ocr_provider('ollama')
+            result = environment.read_bytes()
+            self.assertIn(b'OPENROUTER_API_KEY=existing-secret\r\n', result)
+            self.assertIn(b'PUBLIC_DOMAIN=example.com\r\n', result)
+            self.assertIn(b'CONSENT_NOTICE_VERSION=older-v1\r\n', result)
+            self.assertIn(b'OCR_PROVIDER=ollama\r\n', result)
+            self.assertIn(b'OLLAMA_BASE_URL=http://ollama:11434\r\n', result)
+            self.assertIn(b'OLLAMA_MODEL=openbmb/minicpm-ocr1.0\r\n', result)
+            self.assertIn(b'OCR_TIMEOUT_SECONDS=85\r\n', result)
+            self.assertIn(b'OCR_MAX_RETRIES=0\r\n', result)
             self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
 
-    def test_gcp_ocr_config_rejects_duplicate_settings_without_changes(self):
+    def test_provider_switches_both_ways_and_repeated_choice_is_byte_stable(self):
         with tempfile.TemporaryDirectory() as directory:
             secrets_dir = Path(directory) / 'secrets'
             secrets_dir.mkdir()
             environment = secrets_dir / 'production.env'
-            original = 'OCR_ENABLED=false\nOPENROUTER_API_KEY=\nOPENROUTER_API_KEY=\n'
-            environment.write_text(original)
+            environment.write_text(
+                'OPENROUTER_API_KEY=private-key\nOCR_ENABLED=false\nOCR_PROVIDER=ollama\n'
+                'OLLAMA_BASE_URL=http://custom-ollama:11434\nOLLAMA_MODEL=custom:model\n'
+                'OCR_TIMEOUT_SECONDS=91\nOCR_MAX_RETRIES=2\n')
+            with patch.object(runtime, 'SECRETS', secrets_dir):
+                runtime.select_ocr_provider('openrouter')
+                runtime.select_ocr_provider('ollama')
+                selected_ollama = environment.read_bytes()
+                runtime.select_ocr_provider('ollama')
+            self.assertEqual(environment.read_bytes(), selected_ollama)
+            self.assertIn(b'OPENROUTER_API_KEY=private-key\n', selected_ollama)
+            self.assertIn(b'OCR_PROVIDER=ollama\n', selected_ollama)
+            self.assertIn(b'OLLAMA_BASE_URL=http://custom-ollama:11434\n', selected_ollama)
+            self.assertIn(b'OLLAMA_MODEL=custom:model\n', selected_ollama)
+            self.assertIn(b'OCR_TIMEOUT_SECONDS=91\n', selected_ollama)
+            self.assertIn(b'OCR_MAX_RETRIES=2\n', selected_ollama)
+            with patch.object(runtime, 'SECRETS', secrets_dir):
+                runtime.select_ocr_provider('openrouter')
+            self.assertIn(b'OCR_PROVIDER=openrouter\n', environment.read_bytes())
+            self.assertIn(b'OPENROUTER_API_KEY=private-key\n', environment.read_bytes())
+
+    def test_vertex_selection_defaults_model_and_preserves_other_provider_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            environment.write_text(
+                'OCR_ENABLED=false\nOCR_PROVIDER=ollama\n'
+                'GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n'
+                'OPENROUTER_API_KEY=private-key\nOLLAMA_MODEL=custom:model\n')
+            with patch.object(runtime, 'SECRETS', secrets_dir):
+                runtime.select_ocr_provider('vertex')
+                selected = environment.read_bytes()
+                runtime.select_ocr_provider('vertex')
+            self.assertEqual(environment.read_bytes(), selected)
+            self.assertIn(b'OCR_ENABLED=true\n', selected)
+            self.assertIn(b'OCR_PROVIDER=vertex\n', selected)
+            self.assertIn(b'GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n', selected)
+            self.assertIn(b'VERTEX_AI_MODEL=gemini-3.5-flash-lite\n', selected)
+            self.assertIn(b'OPENROUTER_API_KEY=private-key\n', selected)
+            self.assertIn(b'OLLAMA_MODEL=custom:model\n', selected)
+
+    def test_vertex_selection_rejects_missing_project_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            for original in [
+                b'OCR_PROVIDER=ollama\n',
+                b'OCR_PROVIDER=ollama\nGOOGLE_CLOUD_PROJECT=\n',
+                b'OCR_PROVIDER=ollama\nGOOGLE_CLOUD_PROJECT="" # not configured\n',
+                b'OCR_PROVIDER=ollama\nGOOGLE_CLOUD_PROJECT=$MISSING_PROJECT\n',
+            ]:
+                with self.subTest(original=original):
+                    environment.write_bytes(original)
+                    with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
+                        runtime.select_ocr_provider('vertex')
+                    self.assertEqual(environment.read_bytes(), original)
+
+    def test_vertex_selection_populates_missing_project_from_argument(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            original = b'OCR_PROVIDER=ollama\nOPENROUTER_API_KEY=private-key\n'
+            environment.write_bytes(original)
+            with patch.object(runtime, 'SECRETS', secrets_dir):
+                runtime.select_ocr_provider('vertex', 'refined-outlet-249712')
+            result = environment.read_bytes()
+            self.assertIn(b'GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n', result)
+            self.assertIn(b'VERTEX_AI_MODEL=gemini-3.5-flash-lite\n', result)
+            self.assertIn(b'OPENROUTER_API_KEY=private-key\n', result)
+
+    def test_vertex_selection_rejects_conflicting_project_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            original = b'GOOGLE_CLOUD_PROJECT=existing-project\nOCR_PROVIDER=ollama\n'
+            environment.write_bytes(original)
             with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
-                runtime.enable_ocr()
-            self.assertEqual(environment.read_text(), original)
+                runtime.select_ocr_provider('vertex', 'refined-outlet-249712')
+            self.assertEqual(environment.read_bytes(), original)
+
+    def test_vertex_selection_rejects_invalid_project_id_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            original = b'OCR_PROVIDER=ollama\n'
+            environment.write_bytes(original)
+            with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
+                runtime.select_ocr_provider('vertex', 'INVALID_PROJECT')
+            self.assertEqual(environment.read_bytes(), original)
+
+    def test_vertex_selection_with_matching_argument_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            project_line = b'GOOGLE_CLOUD_PROJECT="refined-outlet-249712" # existing\n'
+            environment.write_bytes(project_line)
+            with patch.object(runtime, 'SECRETS', secrets_dir):
+                runtime.select_ocr_provider('vertex', 'refined-outlet-249712')
+                selected = environment.read_bytes()
+                runtime.select_ocr_provider('vertex', 'refined-outlet-249712')
+            self.assertEqual(environment.read_bytes(), selected)
+            self.assertIn(project_line, selected)
+
+    def test_vertex_selection_rejects_duplicate_project_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            original = b'GOOGLE_CLOUD_PROJECT=first\nGOOGLE_CLOUD_PROJECT=second\n'
+            environment.write_bytes(original)
+            with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
+                runtime.select_ocr_provider('vertex')
+            self.assertEqual(environment.read_bytes(), original)
+
+    def test_vertex_selection_preserves_configured_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            original_model = b'VERTEX_AI_MODEL=gemini-custom\n'
+            environment.write_bytes(
+                b'GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n' + original_model)
+            with patch.object(runtime, 'SECRETS', secrets_dir):
+                runtime.select_ocr_provider('vertex')
+            self.assertIn(original_model, environment.read_bytes())
+            self.assertNotIn(b'VERTEX_AI_MODEL=gemini-3.5-flash-lite\n', environment.read_bytes())
+
+    def test_new_production_environment_defaults_to_vertex(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            with patch.object(runtime, 'SECRETS', secrets_dir), patch.object(
+                runtime.subprocess, 'run', return_value=SimpleNamespace(returncode=1)
+            ):
+                runtime.environment('example.com')
+            result = (secrets_dir / 'production.env').read_text()
+            self.assertIn('OCR_PROVIDER=vertex\n', result)
+            self.assertIn('GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n', result)
+            self.assertIn('VERTEX_AI_MODEL=gemini-3.5-flash-lite\n', result)
+
+    def test_ollama_selection_repairs_missing_or_out_of_range_budget_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            environment.write_text(
+                'OCR_TIMEOUT_SECONDS=121\nOCR_MAX_RETRIES=invalid\n'
+                'OLLAMA_BASE_URL=http://custom-ollama:11434\n')
+            with patch.object(runtime, 'SECRETS', secrets_dir):
+                runtime.select_ocr_provider('ollama')
+            result = environment.read_text()
+            self.assertIn('OCR_TIMEOUT_SECONDS=85\n', result)
+            self.assertIn('OCR_MAX_RETRIES=0\n', result)
+            self.assertIn('OLLAMA_BASE_URL=http://custom-ollama:11434\n', result)
+            self.assertIn('OLLAMA_MODEL=openbmb/minicpm-ocr1.0\n', result)
+
+    def test_openrouter_without_key_rejects_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            for key_line in [
+                b'', b'OPENROUTER_API_KEY=\n', b'OPENROUTER_API_KEY=   \n',
+                b'OPENROUTER_API_KEY="" # awaiting setup\n',
+                b"OPENROUTER_API_KEY='' # awaiting setup\n",
+                b'OPENROUTER_API_KEY=   # awaiting setup\n',
+                b'OPENROUTER_API_KEY=${MISSING_KEY}\n',
+                b'OPENROUTER_API_KEY="${MISSING_KEY}" # unresolved\n',
+                b'OPENROUTER_API_KEY=$MISSING_KEY\n',
+                b'OPENROUTER_API_KEY="$MISSING_KEY" # unresolved\n',
+                b"OPENROUTER_API_KEY='$MISSING_KEY' # unresolved\n",
+            ]:
+                original = b'OCR_ENABLED=false\n' + key_line + b'PUBLIC_DOMAIN=example.com\n'
+                environment.write_bytes(original)
+                with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
+                    runtime.select_ocr_provider('openrouter')
+                self.assertEqual(environment.read_bytes(), original)
+
+    def test_openrouter_accepts_quoted_literal_key_and_preserves_key_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            for key_line in [
+                b'OPENROUTER_API_KEY="literal-hosted-key" # provisioned\n',
+                b"OPENROUTER_API_KEY='literal-hosted-key' # provisioned\n",
+            ]:
+                with self.subTest(key_line=key_line):
+                    original = key_line + b'PUBLIC_DOMAIN=example.com\n'
+                    environment.write_bytes(original)
+                    with patch.object(runtime, 'SECRETS', secrets_dir):
+                        runtime.select_ocr_provider('openrouter')
+                    result = environment.read_bytes()
+                    self.assertIn(key_line, result)
+                    self.assertIn(b'OCR_PROVIDER=openrouter\n', result)
+
+    def test_duplicate_touched_settings_reject_without_changes(self):
+        cases = [
+            b'OCR_ENABLED=false\nOCR_ENABLED=true\n',
+            b'OCR_PROVIDER=ollama\nOCR_PROVIDER=openrouter\n',
+            b'OCR_TIMEOUT_SECONDS=85\nOCR_TIMEOUT_SECONDS=90\n',
+            b'OLLAMA_MODEL=one\nOLLAMA_MODEL=two\n',
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            for original in cases:
+                with self.subTest(original=original):
+                    environment.write_bytes(original)
+                    with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
+                        runtime.select_ocr_provider('ollama')
+                    self.assertEqual(environment.read_bytes(), original)
+
+    def test_openrouter_duplicate_key_rejects_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            original = b'OPENROUTER_API_KEY=first\nOPENROUTER_API_KEY=second\n'
+            environment.write_bytes(original)
+            with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
+                runtime.select_ocr_provider('openrouter')
+            self.assertEqual(environment.read_bytes(), original)
+
+    def test_invalid_provider_rejects_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            original = b'PUBLIC_DOMAIN=example.com\n'
+            environment.write_bytes(original)
+            with patch.object(runtime, 'SECRETS', secrets_dir), self.assertRaises(SystemExit):
+                runtime.select_ocr_provider('automatic')
+            self.assertEqual(environment.read_bytes(), original)
+
+    def test_provider_selection_protects_file_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_dir = Path(directory) / 'secrets'
+            secrets_dir.mkdir()
+            environment = secrets_dir / 'production.env'
+            environment.write_text('OPENROUTER_API_KEY=private-key\n')
+            environment.chmod(0o644)
+            with patch.object(runtime, 'SECRETS', secrets_dir):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    runtime.select_ocr_provider('openrouter')
+            self.assertIn('openrouter', output.getvalue())
+            self.assertNotIn('private-key', output.getvalue())
+            self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == '__main__':
