@@ -17,14 +17,13 @@ mkdir -p /opt/latentsig-connect
 rsync -a --delete --exclude=.env "$staging/" /opt/latentsig-connect/
 cd /opt/latentsig-connect
 python3 deploy/gcp/runtime.py environment "$domain"
-python3 deploy/gcp/runtime.py enable-ocr
+python3 deploy/gcp/runtime.py ocr-provider ollama
 ln -sfn /srv/latentsig-connect/secrets/production.env .env
 printf 'BACKUP_BUCKET=%s\n' "$bucket" > /etc/latentsig-connect.conf
 chmod 600 /etc/latentsig-connect.conf
 export COMPOSE_PROJECT_NAME=latentsig-connect
 docker compose --profile production config --quiet
 docker compose --profile production up --build --wait --wait-timeout 1800 -d
-docker compose --profile production exec -T backend python -m app.cli verify-ocr
 python3 deploy/gcp/runtime.py admins
 bash deploy/gcp/operations.sh install-timers
 echo 'Stack started. Run issue-tls after DNS points at this VM.'

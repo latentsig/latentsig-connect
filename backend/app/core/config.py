@@ -1,6 +1,7 @@
+import re
 from pathlib import Path
 from urllib.parse import urlparse
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -34,13 +35,14 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "google/gemini-3.8-flash"
+    google_cloud_project: str = Field(default="", validation_alias=AliasChoices("GOOGLE_CLOUD_PROJECT", "GCP_PROJECT_ID", "google_cloud_project"))
+    vertex_ai_model: str = "gemini-3.5-flash-lite"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "openbmb/minicpm-ocr1.0"
     ocr_provider: str = "openrouter"
     ocr_timeout_seconds: int = 20
     ocr_max_retries: int = 2
     ocr_max_output_tokens: int = 1000
-    ocr_context_tokens: int = 8192
     ocr_enabled: bool = True
     google_service_account_json: str = ""
     google_service_account_email: str = ""
@@ -75,10 +77,13 @@ class Settings(BaseSettings):
             raise ValueError("OCR_MAX_RETRIES must be between 0 and 5.")
         if self.ocr_max_output_tokens < 100 or self.ocr_max_output_tokens > 4000:
             raise ValueError("OCR_MAX_OUTPUT_TOKENS must be between 100 and 4000.")
-        if self.ocr_context_tokens < 2048 or self.ocr_context_tokens > 32768:
-            raise ValueError("OCR_CONTEXT_TOKENS must be between 2048 and 32768.")
-        if self.ocr_provider.lower() not in {"ollama", "openrouter"}:
-            raise ValueError("OCR_PROVIDER must be ollama or openrouter.")
+        if self.ocr_provider.lower() not in {"ollama", "openrouter", "vertex"}:
+            raise ValueError("OCR_PROVIDER must be ollama, openrouter, or vertex.")
+        if self.ocr_enabled and self.ocr_provider.lower() == "vertex":
+            if not re.fullmatch(r"[a-z][a-z0-9-]{4,61}[a-z0-9]", self.google_cloud_project):
+                raise ValueError("GOOGLE_CLOUD_PROJECT must be a valid project ID when OCR_PROVIDER is vertex.")
+            if not re.fullmatch(r"gemini-[a-z0-9.-]+", self.vertex_ai_model):
+                raise ValueError("VERTEX_AI_MODEL must be a Gemini model ID without a path.")
         if self.app_env.lower() == "production":
             if self.app_secret.strip().lower() in {
                 "local-development-only", "replace-this-before-deployment", "replace-with-generated-random-value",

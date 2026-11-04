@@ -17,11 +17,11 @@ concurrency:
 jobs:
   deploy:
     if: >-
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'))
+      github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: production
@@ -36,6 +36,8 @@ jobs:
       PUBLIC_DOMAIN: latentsig-connect.34.93.221.72.sslip.io
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Validate protected deployment configuration
         env:
@@ -69,6 +71,13 @@ jobs:
           gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
             --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
             --command="sudo bash /opt/latentsig-connect/deploy/gcp/deploy.sh /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz $PUBLIC_DOMAIN $GCP_BACKUP_BUCKET"
+
+      - name: Verify configured OCR provider
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
+            --command="sudo sh -c 'cd /opt/latentsig-connect && docker compose --profile production exec -T backend python -m app.cli verify-ocr'"
 
       - name: Verify public production endpoints
         run: |

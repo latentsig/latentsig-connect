@@ -57,36 +57,134 @@ def change_domain(domain):
     print('Public origin settings updated. Rebuild the frontend and issue TLS before public use.')
 
 
-def enable_ocr():
-    """Select the self-hosted MiniCPM model and turn on card scanning."""
+def env_value_literal(value):
+    """Read a literal Compose env value without expanding it."""
+    stripped = value.strip()
+    if stripped[:1] in {b'"', b"'"}:
+        quote = stripped[:1]
+        escaped = False
+        closing = None
+        for index in range(1, len(stripped)):
+            character = stripped[index:index + 1]
+            if character == quote and not escaped:
+                closing = index
+                break
+            if character == b'\\' and not escaped:
+                escaped = True
+            else:
+                escaped = False
+        if closing is None:
+            return None
+        literal = stripped[1:closing].strip()
+        trailing = stripped[closing + 1:]
+        if trailing:
+            if not trailing.startswith((b' ', b'\t')) or not trailing.strip().startswith(b'#'):
+                return None
+    else:
+        if re.match(rb'^\s+#', value):
+            literal = b''
+        else:
+            literal = re.split(rb'\s+#', value, maxsplit=1)[0].strip()
+    if b'$' in literal:
+        return None
+    return literal
+
+
+def select_ocr_provider(provider, project_id=None):
+    """Select an OCR provider without changing unrelated environment settings."""
+    if provider not in {'ollama', 'openrouter', 'vertex'}:
+        raise SystemExit('OCR provider must be ollama, openrouter, or vertex.')
+    if project_id is not None and provider != 'vertex':
+        raise SystemExit('A project ID can only be supplied when selecting vertex.')
     path = SECRETS / 'production.env'
     if not path.is_file():
-        raise SystemExit('Existing production.env is required to enable card scanning.')
-    replacements = {
-        b'OCR_ENABLED': b'true', b'OCR_PROVIDER': b'ollama',
-        b'OLLAMA_BASE_URL': b'http://ollama:11434',
-        b'OLLAMA_MODEL': b'openbmb/minicpm-ocr1.0',
-        b'OCR_TIMEOUT_SECONDS': b'120', b'OCR_MAX_RETRIES': b'0',
-        b'OCR_CONTEXT_TOKENS': b'8192',
-        b'CONSENT_NOTICE_VERSION': b'2026-11-02-v1',
-        b'OPENROUTER_API_KEY': b'',
-    }
-    counts = dict.fromkeys(replacements, 0)
+        raise SystemExit('Existing production.env is required to select an OCR provider.')
+
+    original = path.read_bytes()
+    lines = original.splitlines(keepends=True)
+    values = {}
+    counts = {}
+    for line in lines:
+        content = line.rstrip(b'\r\n')
+        name, separator, _ = content.partition(b'=')
+        if separator:
+            counts[name] = counts.get(name, 0) + 1
+            values[name] = content.partition(b'=')[2]
+
+    touched = [b'OCR_ENABLED', b'OCR_PROVIDER']
+    replacements = {b'OCR_ENABLED': b'true', b'OCR_PROVIDER': provider.encode()}
+    if provider == 'ollama':
+        touched.extend([
+            b'OLLAMA_BASE_URL', b'OLLAMA_MODEL',
+            b'OCR_TIMEOUT_SECONDS', b'OCR_MAX_RETRIES',
+        ])
+    elif provider == 'vertex':
+        touched.extend([b'GOOGLE_CLOUD_PROJECT', b'VERTEX_AI_MODEL'])
+    if any(counts.get(name, 0) > 1 for name in touched):
+        raise SystemExit('Duplicate OCR setting in production.env; environment unchanged.')
+
+    if provider == 'ollama':
+        defaults = {
+            b'OLLAMA_BASE_URL': b'http://ollama:11434',
+            b'OLLAMA_MODEL': b'openbmb/minicpm-ocr1.0',
+            b'OCR_TIMEOUT_SECONDS': b'85',
+            b'OCR_MAX_RETRIES': b'0',
+        }
+        for name, default in defaults.items():
+            value = values.get(name, b'').strip()
+            sensible = bool(value)
+            if name in {b'OCR_TIMEOUT_SECONDS', b'OCR_MAX_RETRIES'}:
+                try:
+                    number = int(value)
+                except ValueError:
+                    sensible = False
+                else:
+                    lower, upper = (1, 120) if name == b'OCR_TIMEOUT_SECONDS' else (0, 5)
+                    sensible = lower <= number <= upper
+            if not sensible:
+                replacements[name] = default
+    elif provider == 'openrouter':
+        if counts.get(b'OPENROUTER_API_KEY', 0) > 1:
+            raise SystemExit('Duplicate OPENROUTER_API_KEY in production.env; environment unchanged.')
+        if not env_value_literal(values.get(b'OPENROUTER_API_KEY', b'')):
+            raise SystemExit('OPENROUTER_API_KEY must already contain a nonempty literal value before selecting openrouter. Environment unchanged.')
+    if provider == 'vertex':
+        configured_project = env_value_literal(values.get(b'GOOGLE_CLOUD_PROJECT', b''))
+        supplied_project = project_id.encode() if project_id is not None else None
+        if supplied_project is not None and not re.fullmatch(rb'[a-z][a-z0-9-]{4,61}[a-z0-9]', supplied_project):
+            raise SystemExit('Provide a valid literal Google Cloud project ID. Environment unchanged.')
+        if counts.get(b'GOOGLE_CLOUD_PROJECT', 0):
+            if configured_project is None or not re.fullmatch(rb'[a-z][a-z0-9-]{4,61}[a-z0-9]', configured_project):
+                raise SystemExit('Existing GOOGLE_CLOUD_PROJECT must contain a valid literal project ID. Environment unchanged.')
+            if supplied_project is not None and configured_project != supplied_project:
+                raise SystemExit('Existing GOOGLE_CLOUD_PROJECT differs from the supplied project ID. Environment unchanged.')
+        elif supplied_project is not None:
+            replacements[b'GOOGLE_CLOUD_PROJECT'] = supplied_project
+        else:
+            raise SystemExit('Supply a project ID with ocr-provider vertex PROJECT_ID. Environment unchanged.')
+
+        configured_model = env_value_literal(values.get(b'VERTEX_AI_MODEL', b''))
+        raw_model = values.get(b'VERTEX_AI_MODEL', b'').strip()
+        if counts.get(b'VERTEX_AI_MODEL', 0) and configured_model is None and raw_model:
+            raise SystemExit('Existing VERTEX_AI_MODEL must contain a literal model ID. Environment unchanged.')
+        if not configured_model:
+            replacements[b'VERTEX_AI_MODEL'] = b'gemini-3.5-flash-lite'
+
     updated = []
-    for line in path.read_bytes().splitlines(keepends=True):
+    for line in lines:
         content = line.rstrip(b'\r\n')
         name, separator, _ = content.partition(b'=')
         if separator and name in replacements:
-            counts[name] += 1
             line = name + b'=' + replacements[name] + line[len(content):]
         updated.append(line)
-    if any(count > 1 for count in counts.values()):
-        raise SystemExit('Duplicate OCR setting in production.env; environment unchanged.')
-    for name, count in counts.items():
-        if count == 0:
-            updated.append(name + b'=' + replacements[name] + b'\n')
+    newline = b'\r\n' if b'\r\n' in original else b'\n'
+    for name in touched:
+        if counts.get(name, 0) == 0:
+            if updated and not updated[-1].endswith((b'\n', b'\r')):
+                updated[-1] += newline
+            updated.append(name + b'=' + replacements.get(name, values.get(name, b'')) + newline)
     save(path, b''.join(updated))
-    print('Card scanning enabled with the self-hosted MiniCPM-OCR model; no provider key is used.')
+    print(f'OCR provider selected: {provider}; card scanning enabled.')
 
 
 def environment(domain):
@@ -113,9 +211,10 @@ def environment(domain):
         'GOOGLE_REDIRECT_URI': f'https://{domain}/api/v1/auth/google/callback',
         'ADMIN_EMAIL_ALLOWLIST': 'raksha@latentsig.com,bhoomika@latentsig.com,bharat@latentsig.com,info@latentsig.com,shauryasharthak@latentsig.com',
         'INITIAL_ADMIN_EMAILS': ','.join(ADMINS), 'OCR_ENABLED': 'true',
-        'OCR_PROVIDER': 'ollama', 'OLLAMA_BASE_URL': 'http://ollama:11434',
-        'OLLAMA_MODEL': 'openbmb/minicpm-ocr1.0', 'OCR_TIMEOUT_SECONDS': '120',
-        'OCR_CONTEXT_TOKENS': '8192',
+        'OCR_PROVIDER': 'ollama', 'GOOGLE_CLOUD_PROJECT': 'refined-outlet-249712',
+        'VERTEX_AI_MODEL': 'gemini-3.5-flash-lite',
+        'OLLAMA_BASE_URL': 'http://ollama:11434',
+        'OLLAMA_MODEL': 'openbmb/minicpm-ocr1.0', 'OCR_TIMEOUT_SECONDS': '85',
         'OCR_MAX_RETRIES': '0', 'CONSENT_NOTICE_VERSION': '2026-11-02-v1',
         'OPENROUTER_API_KEY': '',
     }
@@ -174,7 +273,7 @@ if __name__ == '__main__':
         admins()
     elif sys.argv[1] == 'check-dns':
         check_dns()
-    elif sys.argv[1] == 'enable-ocr' and len(sys.argv) == 2:
-        enable_ocr()
+    elif sys.argv[1] == 'ocr-provider' and len(sys.argv) in {3, 4}:
+        select_ocr_provider(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else None)
     else:
-        raise SystemExit('Expected environment, domain, admins, check-dns, or enable-ocr.')
+        raise SystemExit('Expected environment, domain, admins, check-dns, or ocr-provider ollama|openrouter|vertex [PROJECT_ID].')

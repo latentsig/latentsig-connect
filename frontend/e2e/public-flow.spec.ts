@@ -10,7 +10,7 @@ async function acceptNotice(page: Page, allowFollowUp = true) {
 }
 
 async function acceptAiImageNotice(page: Page) {
-  const checkbox = page.getByRole('checkbox', { name: /I agree to send this card image/ })
+  const checkbox = page.getByRole('checkbox', { name: /may process this card image/i })
   if (await checkbox.count()) await checkbox.check()
 }
 

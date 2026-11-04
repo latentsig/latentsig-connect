@@ -48,8 +48,7 @@ def _manual_review_result(reason: str) -> dict[str, object]:
         "website": _field(None), "address": _field(None),
         "candidates": {"emails": [], "phones": [], "websites": []},
         "ocr_text": "", "text_blocks": [], "is_template": False,
-        "warnings": [], "uncertain_fields": [], "ocr_status": "unavailable",
-        "ocr_notice": reason,
+        "warnings": [], "uncertain_fields": [], "ocr_status": "unavailable", "ocr_notice": reason,
     }
 
 
@@ -82,7 +81,8 @@ async def read_business_card(files: list[UploadFile] = File(default=[]), file: U
             data_by_side.append((side, upload, data, mime_type))
         if not ai_processing_consent:
             raise HTTPException(status_code=422, detail="Please agree to AI processing of your card image before scanning it.")
-        # Decode and validate images before retaining a private staging copy.
+        # Validate first, then stage the originals before inference so a temporary
+        # OCR outage cannot discard the visitor's uploaded card images.
         prepared_images = [await run_in_threadpool(decode_and_prepare, item[2]) for item in data_by_side]
         consent_at = datetime.now(timezone.utc).isoformat()
         tokens: dict[str, str] = {}
@@ -93,25 +93,23 @@ async def read_business_card(files: list[UploadFile] = File(default=[]), file: U
             })
             tokens[side] = token
             staged_tokens.append(token)
-        # Keep the user's images if the model is unavailable so the review form can
-        # be completed manually. Permanent storage happens with the lead submission.
         try:
             result = await run_in_threadpool(_extract, [(image, "image/jpeg") for image in prepared_images])
             result["ocr_status"] = "complete"
         except VisionConfigurationError:
             logger.warning("Card OCR is not configured; preserving staged images for manual review")
             result = _manual_review_result(
-                "Automatic reading is unavailable. Enter your details below; both card images will be saved when you submit."
+                "Automatic reading is unavailable. Enter your details below; your card images will be saved when you submit."
             )
         except VisionUnavailable:
             logger.warning("Card OCR provider is unavailable; preserving staged images for manual review")
             result = _manual_review_result(
-                "We couldn’t read the card automatically. Enter or correct your details below; both card images will be saved when you submit."
+                "We couldn’t read the card automatically. Enter or correct your details below; your card images will be saved when you submit."
             )
         except Exception:
             logger.exception("Card OCR processing failed; preserving staged images for manual review")
             result = _manual_review_result(
-                "Automatic reading failed. Enter or correct your details below; both card images will be saved when you submit."
+                "Automatic reading failed. Enter or correct your details below; your card images will be saved when you submit."
             )
         result["business_card_tokens"] = tokens
         result["business_card_token"] = tokens["front"]
@@ -123,10 +121,10 @@ async def read_business_card(files: list[UploadFile] = File(default=[]), file: U
     except Exception:
         for token in staged_tokens:
             storage.delete_staged(token)
-        logger.exception("Business-card upload or staging failed")
+        logger.exception("Business-card extraction failed")
         raise HTTPException(
             status_code=503,
-            detail="Card scanning is temporarily unavailable. You can retry or enter your details manually.",
+            detail="Card upload could not be saved. Please retry or enter your details manually.",
         ) from None
     finally:
         for upload in uploads:
