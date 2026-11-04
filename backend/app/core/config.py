@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     ocr_timeout_seconds: int = 20
     ocr_max_retries: int = 2
     ocr_max_output_tokens: int = 1000
+    ocr_context_tokens: int = 8192
     ocr_enabled: bool = True
     google_service_account_json: str = ""
     google_service_account_email: str = ""
@@ -74,6 +75,8 @@ class Settings(BaseSettings):
             raise ValueError("OCR_MAX_RETRIES must be between 0 and 5.")
         if self.ocr_max_output_tokens < 100 or self.ocr_max_output_tokens > 4000:
             raise ValueError("OCR_MAX_OUTPUT_TOKENS must be between 100 and 4000.")
+        if self.ocr_context_tokens < 2048 or self.ocr_context_tokens > 32768:
+            raise ValueError("OCR_CONTEXT_TOKENS must be between 2048 and 32768.")
         if self.ocr_provider.lower() not in {"ollama", "openrouter"}:
             raise ValueError("OCR_PROVIDER must be ollama or openrouter.")
         if self.app_env.lower() == "production":

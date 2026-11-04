@@ -41,12 +41,23 @@ def _request(images: list[tuple[bytes, str]]) -> CardExtraction:
             raise VisionConfigurationError("Ollama base URL must use HTTP or HTTPS.")
         messages: list[dict[str, object]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "Extract contact details from these card image(s).", "images": [base64.b64encode(image).decode("ascii") for image, _ in images]},
+            {
+                "role": "user",
+                "content": (
+                    "Extract the contact fields printed on the front and optional back of this business card. "
+                    "Return one JSON object matching the supplied schema. Use null when a value is absent or unclear."
+                ),
+                "images": [base64.b64encode(image).decode("ascii") for image, _ in images],
+            },
         ]
         payload = {
             "model": settings.ollama_model, "messages": messages, "stream": False,
             "format": _JSON_SCHEMA,
-            "options": {"temperature": 0, "num_predict": settings.ocr_max_output_tokens, "num_ctx": 4096},
+            "options": {
+                "temperature": 0,
+                "num_predict": settings.ocr_max_output_tokens,
+                "num_ctx": settings.ocr_context_tokens,
+            },
         }
         endpoint = f"{base}/api/chat"
         response_path = "ollama"
@@ -81,8 +92,10 @@ def _request(images: list[tuple[bytes, str]]) -> CardExtraction:
             text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
         parsed = CardExtraction.model_validate_json(text)
         # Treat blank strings as missing rather than propagating phantom values.
-        cleaned = {key: (None if isinstance(value, str) and not value.strip() else value)
-            for key, value in parsed.model_dump().items()}
+        cleaned = {
+            key: (None if isinstance(value, str) and value.strip().lower() in {"", "###", "n/a", "not provided"} else value)
+            for key, value in parsed.model_dump().items()
+        }
         if cleaned["is_template"]:
             for field in ("full_name", "company", "job_title", "email", "phone", "website", "address"):
                 cleaned[field] = None
@@ -94,7 +107,12 @@ def _request(images: list[tuple[bytes, str]]) -> CardExtraction:
         # Do not log provider response bodies: they may contain submitted data.
         logger.warning("OCR provider request failed with HTTP status %s", exc.code)
         raise VisionUnavailable from None
-    except (URLError, TimeoutError, OSError, KeyError, IndexError, TypeError, ValueError, ValidationError):
+    except (URLError, TimeoutError, OSError) as exc:
+        reason = "timeout" if isinstance(exc, TimeoutError) else type(exc).__name__
+        logger.warning("OCR provider request failed (%s)", reason)
+        raise VisionUnavailable from None
+    except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
+        logger.warning("OCR provider returned an unusable response (%s)", type(exc).__name__)
         raise VisionUnavailable from None
 
 

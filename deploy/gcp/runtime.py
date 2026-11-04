@@ -66,7 +66,8 @@ def enable_ocr():
         b'OCR_ENABLED': b'true', b'OCR_PROVIDER': b'ollama',
         b'OLLAMA_BASE_URL': b'http://ollama:11434',
         b'OLLAMA_MODEL': b'openbmb/minicpm-ocr1.0',
-        b'OCR_TIMEOUT_SECONDS': b'85', b'OCR_MAX_RETRIES': b'0',
+        b'OCR_TIMEOUT_SECONDS': b'120', b'OCR_MAX_RETRIES': b'0',
+        b'OCR_CONTEXT_TOKENS': b'8192',
         b'CONSENT_NOTICE_VERSION': b'2026-11-02-v1',
         b'OPENROUTER_API_KEY': b'',
     }
@@ -113,7 +114,8 @@ def environment(domain):
         'ADMIN_EMAIL_ALLOWLIST': 'raksha@latentsig.com,bhoomika@latentsig.com,bharat@latentsig.com,info@latentsig.com,shauryasharthak@latentsig.com',
         'INITIAL_ADMIN_EMAILS': ','.join(ADMINS), 'OCR_ENABLED': 'true',
         'OCR_PROVIDER': 'ollama', 'OLLAMA_BASE_URL': 'http://ollama:11434',
-        'OLLAMA_MODEL': 'openbmb/minicpm-ocr1.0', 'OCR_TIMEOUT_SECONDS': '85',
+        'OLLAMA_MODEL': 'openbmb/minicpm-ocr1.0', 'OCR_TIMEOUT_SECONDS': '120',
+        'OCR_CONTEXT_TOKENS': '8192',
         'OCR_MAX_RETRIES': '0', 'CONSENT_NOTICE_VERSION': '2026-11-02-v1',
         'OPENROUTER_API_KEY': '',
     }

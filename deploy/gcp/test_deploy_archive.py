@@ -61,7 +61,7 @@ class DeploymentArchiveTests(unittest.TestCase):
             environment.write_text('OCR_ENABLED=false\nOPENROUTER_API_KEY=old-key\nPUBLIC_DOMAIN=example.com\n')
             with patch.object(runtime, 'SECRETS', secrets_dir):
                 runtime.enable_ocr()
-            self.assertEqual(environment.read_text(), 'OCR_ENABLED=true\nOPENROUTER_API_KEY=\nPUBLIC_DOMAIN=example.com\nOCR_PROVIDER=ollama\nOLLAMA_BASE_URL=http://ollama:11434\nOLLAMA_MODEL=openbmb/minicpm-ocr1.0\nOCR_TIMEOUT_SECONDS=85\nOCR_MAX_RETRIES=0\nCONSENT_NOTICE_VERSION=2026-11-02-v1\n')
+            self.assertEqual(environment.read_text(), 'OCR_ENABLED=true\nOPENROUTER_API_KEY=\nPUBLIC_DOMAIN=example.com\nOCR_PROVIDER=ollama\nOLLAMA_BASE_URL=http://ollama:11434\nOLLAMA_MODEL=openbmb/minicpm-ocr1.0\nOCR_TIMEOUT_SECONDS=120\nOCR_MAX_RETRIES=0\nOCR_CONTEXT_TOKENS=8192\nCONSENT_NOTICE_VERSION=2026-11-02-v1\n')
             self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
 
     def test_gcp_ocr_config_rejects_duplicate_settings_without_changes(self):

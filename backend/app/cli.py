@@ -79,7 +79,9 @@ def verify_ocr() -> None:
         raise SystemExit("OCR smoke test failed. Check the configured provider and model availability.") from None
     if result.is_template:
         raise SystemExit("OCR smoke test returned an unexpected template classification.")
-    print("OCR smoke test passed. Synthetic image only; no lead was created and no extracted data was logged.")
+    if result.full_name != "Alex Example" or result.company != "Example Test Company":
+        raise SystemExit("OCR smoke test did not extract the expected synthetic name and company.")
+    print("OCR smoke test passed. Synthetic contact fields matched; no lead was created and no extracted data was logged.")
 
 
 def main() -> None:

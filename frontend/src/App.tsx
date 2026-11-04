@@ -124,7 +124,7 @@ function LeadFormPage({ initialValues, captureMethod = 'manual', ocrWarning }: {
     }
   })
   const toggleInterest = (item: string) => setValue('interest', chosen.includes(item) ? chosen.filter((x) => x !== item) : [...chosen, item], { shouldValidate: true })
-  return <PageFrame compact><Link to={captureMethod === 'business_card' ? '/connect/card' : `/connect${params.toString() ? `?${params}` : ''}`} className="back-link"><ArrowLeft size={16} /> Back</Link><div className="form-heading"><div className="step-label">{captureMethod === 'business_card' ? '02' : '01'} <span /> {captureMethod === 'business_card' ? 'CHECK YOUR DETAILS' : 'YOUR DETAILS'}</div><h1>{captureMethod === 'business_card' ? <>Please confirm<br className="mobile-break"/> your details.</> : <>Tell us a little<br className="mobile-break"/> about yourself.</>}</h1><p>{captureMethod === 'business_card' ? ocrWarning ? 'Review the notice below, then upload a clearer card photo or enter your details manually.' : 'We’ve filled in what we could. Edit anything that needs a correction.' : 'Just the essentials. This takes about a minute.'}</p></div>
+  return <PageFrame compact><Link to={captureMethod === 'business_card' ? '/connect/card' : `/connect${params.toString() ? `?${params}` : ''}`} className="back-link"><ArrowLeft size={16} /> Back</Link><div className="form-heading"><div className="step-label">{captureMethod === 'business_card' ? '02' : '01'} <span /> {captureMethod === 'business_card' ? 'CHECK YOUR DETAILS' : 'YOUR DETAILS'}</div><h1>{captureMethod === 'business_card' ? <>Please confirm<br className="mobile-break"/> your details.</> : <>Tell us a little<br className="mobile-break"/> about yourself.</>}</h1><p>{captureMethod === 'business_card' ? ocrWarning ? 'Review the notice below and enter any missing details before submitting.' : 'We’ve filled in what we could. Edit anything that needs a correction.' : 'Just the essentials. This takes about a minute.'}</p></div>
     {ocrWarning && <div className="ocr-notice" role="status">{ocrWarning}</div>}
     <form onSubmit={submit} noValidate>
       <div className="form-section"><div className="section-title"><span className="section-number">01</span><div><h2>Contact details</h2><p>How can our team reach you?</p></div></div>
@@ -215,6 +215,8 @@ function CardReview() {
   const values = Object.fromEntries(fields.map(([, key]) => [key, scanNeedsRefresh ? '' : (draft[key] as {value?: string} | undefined)?.value || '']))
   const warning = scanNeedsRefresh
     ? 'This saved scan predates template checking, so its extracted values have been cleared. Go back and scan the image again, or enter your details manually.'
+    : draft.ocr_status === 'unavailable'
+    ? typeof draft.ocr_notice === 'string' ? draft.ocr_notice : 'Automatic reading is unavailable. Enter your details below; your card images will be saved when you submit.'
     : draft.is_template
     ? draft.warnings?.[0] || 'This image looks like a card template or mockup. Upload a photo of your completed business card to extract real contact details.'
     : draft.warnings?.join(' ')

@@ -28,7 +28,7 @@ Deployment is intentionally not performed by this setup task. Before launch, pro
 
 From the repository directory on the VPS:
 
-1. Generate the root `.env` with the PowerShell command above, or copy `deploy/production.env.example` and provide unique `APP_SECRET` and `POSTGRES_PASSWORD` values from a secrets manager. Confirm `PUBLIC_DOMAIN=connect.latentsig.com`, both admin emails are allowlisted, and `OCR_ENABLED=false` until the provider key is configured.
+1. Generate the root `.env` with the PowerShell command above, or copy `deploy/production.env.example` and provide unique `APP_SECRET` and `POSTGRES_PASSWORD` values from a secrets manager. Confirm `PUBLIC_DOMAIN=connect.latentsig.com` and both admin emails are allowlisted. The production Compose profile enables self-hosted MiniCPM-OCR through Ollama; it does not need an OpenRouter key.
 2. Start the application and Nginx bootstrap listener with `docker compose --profile production up --build -d`. Nginx serves ACME challenges over HTTP and returns a temporary 503 for other paths until a certificate exists.
    The frontend image build uses `FRONTEND_URL` as the QR code’s public origin. Confirm it is `https://connect.latentsig.com` before building; event capture links and downloaded QR codes will then open that public HTTPS address on phones. Rebuild the frontend image if the public origin changes.
 3. After approved DNS resolves to the VPS and port 80 is publicly reachable, issue the certificate with `sh scripts/issue-tls-certificate.sh` or `./scripts/Issue-TlsCertificate.ps1`. Nginx restarts and selects its HTTPS configuration after issuance. HTTP requests then redirect to HTTPS.
@@ -102,7 +102,7 @@ Repeat the archive transfer and deploy command for subsequent releases. Use `sud
 
 ### Deploy from GitHub Actions
 
-The repository provides a manually triggered **Deploy to GCP** workflow at `.github/workflows/deploy-gcp.yml`. It deploys only `main`, uses GitHub OIDC with GCP Workload Identity Federation (no service-account JSON key), transfers source through IAP, starts the self-hosted Ollama service, downloads MiniCPM-OCR into a persistent private volume, and enables OCR in FastAPI. It then sends a synthetic test card to the local model and checks public HTTPS endpoints. No OpenRouter key or third-party inference API is used; GCP VM compute and storage charges still apply.
+The **Deploy to GCP** workflow at `.github/workflows/deploy-gcp.yml` runs automatically after a push to `main` passes every CI job. A maintainer can also start it manually from GitHub Actions. It uses GitHub OIDC with GCP Workload Identity Federation (no service-account JSON key), transfers source through IAP, starts the self-hosted Ollama service, downloads MiniCPM-OCR into a persistent private volume, and enables OCR in FastAPI. Deployment warms the model with a synthetic card and checks public HTTPS endpoints before reporting success. No OpenRouter key or third-party inference API is used; GCP VM compute and storage charges still apply.
 
 Before the first run:
 
@@ -110,7 +110,7 @@ Before the first run:
 2. Create a GCP Workload Identity Federation OIDC provider restricted to repository `latentsig/latentsig-connect`, ref `refs/heads/main`, and GitHub environment `production`. Map `google.subject=assertion.sub`, `attribute.repository=assertion.repository`, `attribute.ref=assertion.ref`, and `attribute.environment=assertion.environment`; set the provider condition to `assertion.repository == 'latentsig/latentsig-connect' && assertion.ref == 'refs/heads/main' && assertion.environment == 'production'`.
 3. Create or select a deployer service account in project `refined-outlet-249712`. Grant its identity `roles/iam.workloadIdentityUser` for the matching GitHub repository principal set. Grant it `roles/compute.viewer`, `roles/compute.osAdminLogin`, and `roles/iap.tunnelResourceAccessor` on the project. The VM must have OS Login enabled and permit IAP SSH as already required for operator access.
 4. In the GitHub `production` environment, add variables `GCP_WORKLOAD_IDENTITY_PROVIDER` (full provider resource name, `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER`) and `GCP_DEPLOYER_SERVICE_ACCOUNT` (deployer service-account email).
-5. Open **Actions → Deploy to GCP → Run workflow**, select `main`, then run it. Review the run summary; all steps must pass before using the site.
+5. Pushes to `main` deploy automatically after CI passes. For a manual run, open **Actions → Deploy to GCP → Run workflow**, select `main`, then review the run summary; the synthetic OCR check and public smoke check must pass before relying on the deployment.
 
 The workflow expects the VM, persistent disk, backup bucket, DNS, and valid HTTPS certificate described above to already exist. It does not change DNS or create cloud infrastructure. The first deployment downloads about 1.4 GB of model weights and can take several minutes; later deployments reuse the persistent model volume. If the workflow stops at its configuration preflight, add the missing environment variables; if authentication fails, check the WIF provider condition and IAM grants. OCR stays on the VM's private Docker network. The model is Apache-2.0 licensed; the VM still incurs normal GCP costs.
 

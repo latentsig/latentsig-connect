@@ -10,7 +10,7 @@ class VisionClientTests(unittest.TestCase):
     def setUp(self):
         self.original = {name: getattr(settings, name) for name in (
             "openrouter_api_key", "openrouter_base_url", "openrouter_model", "ocr_enabled",
-            "ocr_timeout_seconds", "ocr_max_output_tokens", "ocr_provider", "ollama_base_url", "ollama_model",
+            "ocr_timeout_seconds", "ocr_max_output_tokens", "ocr_context_tokens", "ocr_provider", "ollama_base_url", "ollama_model",
         )}
         settings.openrouter_api_key = "test-key"
         settings.openrouter_base_url = "https://openrouter.ai/api/v1"
@@ -110,6 +110,8 @@ class VisionClientTests(unittest.TestCase):
         self.assertEqual(sent["model"], "openbmb/minicpm-ocr1.0")
         self.assertEqual(sent["messages"][1]["images"], ["c3ludGhldGljLWltYWdl"])
         self.assertEqual(sent["format"]["type"], "object")
+        self.assertEqual(sent["options"]["num_ctx"], 8192)
+        self.assertIn("JSON object", sent["messages"][1]["content"])
         self.assertIsNone(request.get_header("Authorization"))
         self.assertEqual(result.full_name, "Alex Example")
 
