@@ -1,5 +1,6 @@
 import io
 from contextlib import redirect_stdout
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -31,7 +32,7 @@ class DeploymentArchiveTests(unittest.TestCase):
                 'backend/alembic/versions/0001.py', 'backend/.env.example',
             ])
             extract_source(source, destination)
-            self.assertEqual(sorted(str(path.relative_to(destination)) for path in destination.rglob('*') if path.is_file()),
+            self.assertEqual(sorted(path.relative_to(destination).as_posix() for path in destination.rglob('*') if path.is_file()),
                              ['backend/.env.example', 'backend/alembic/versions/0001.py'])
             self.assertEqual((destination / 'backend/alembic/versions/0001.py').read_text(), 'revision = "real_revision"\n')
 
@@ -75,7 +76,8 @@ class DeploymentArchiveTests(unittest.TestCase):
             self.assertIn(b'OLLAMA_MODEL=openbmb/minicpm-ocr1.0\r\n', result)
             self.assertIn(b'OCR_TIMEOUT_SECONDS=85\r\n', result)
             self.assertIn(b'OCR_MAX_RETRIES=0\r\n', result)
-            self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
+            if os.name != 'nt':
+                self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
 
     def test_provider_switches_both_ways_and_repeated_choice_is_byte_stable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -92,16 +94,17 @@ class DeploymentArchiveTests(unittest.TestCase):
                 selected_ollama = environment.read_bytes()
                 runtime.select_ocr_provider('ollama')
             self.assertEqual(environment.read_bytes(), selected_ollama)
-            self.assertIn(b'OPENROUTER_API_KEY=private-key\n', selected_ollama)
-            self.assertIn(b'OCR_PROVIDER=ollama\n', selected_ollama)
-            self.assertIn(b'OLLAMA_BASE_URL=http://custom-ollama:11434\n', selected_ollama)
-            self.assertIn(b'OLLAMA_MODEL=custom:model\n', selected_ollama)
-            self.assertIn(b'OCR_TIMEOUT_SECONDS=91\n', selected_ollama)
-            self.assertIn(b'OCR_MAX_RETRIES=2\n', selected_ollama)
+            self.assertIn(b'OPENROUTER_API_KEY=private-key', selected_ollama.splitlines())
+            self.assertIn(b'OCR_PROVIDER=ollama', selected_ollama.splitlines())
+            self.assertIn(b'OLLAMA_BASE_URL=http://custom-ollama:11434', selected_ollama.splitlines())
+            self.assertIn(b'OLLAMA_MODEL=custom:model', selected_ollama.splitlines())
+            self.assertIn(b'OCR_TIMEOUT_SECONDS=91', selected_ollama.splitlines())
+            self.assertIn(b'OCR_MAX_RETRIES=2', selected_ollama.splitlines())
             with patch.object(runtime, 'SECRETS', secrets_dir):
                 runtime.select_ocr_provider('openrouter')
-            self.assertIn(b'OCR_PROVIDER=openrouter\n', environment.read_bytes())
-            self.assertIn(b'OPENROUTER_API_KEY=private-key\n', environment.read_bytes())
+            lines = environment.read_bytes().splitlines()
+            self.assertIn(b'OCR_PROVIDER=openrouter', lines)
+            self.assertIn(b'OPENROUTER_API_KEY=private-key', lines)
 
     def test_vertex_selection_defaults_model_and_preserves_other_provider_settings(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -117,12 +120,13 @@ class DeploymentArchiveTests(unittest.TestCase):
                 selected = environment.read_bytes()
                 runtime.select_ocr_provider('vertex')
             self.assertEqual(environment.read_bytes(), selected)
-            self.assertIn(b'OCR_ENABLED=true\n', selected)
-            self.assertIn(b'OCR_PROVIDER=vertex\n', selected)
-            self.assertIn(b'GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n', selected)
-            self.assertIn(b'VERTEX_AI_MODEL=gemini-3.5-flash-lite\n', selected)
-            self.assertIn(b'OPENROUTER_API_KEY=private-key\n', selected)
-            self.assertIn(b'OLLAMA_MODEL=custom:model\n', selected)
+            lines = selected.splitlines()
+            self.assertIn(b'OCR_ENABLED=true', lines)
+            self.assertIn(b'OCR_PROVIDER=vertex', lines)
+            self.assertIn(b'GOOGLE_CLOUD_PROJECT=refined-outlet-249712', lines)
+            self.assertIn(b'VERTEX_AI_MODEL=gemini-3.5-flash-lite', lines)
+            self.assertIn(b'OPENROUTER_API_KEY=private-key', lines)
+            self.assertIn(b'OLLAMA_MODEL=custom:model', lines)
 
     def test_vertex_selection_rejects_missing_project_without_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -151,9 +155,10 @@ class DeploymentArchiveTests(unittest.TestCase):
             with patch.object(runtime, 'SECRETS', secrets_dir):
                 runtime.select_ocr_provider('vertex', 'refined-outlet-249712')
             result = environment.read_bytes()
-            self.assertIn(b'GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n', result)
-            self.assertIn(b'VERTEX_AI_MODEL=gemini-3.5-flash-lite\n', result)
-            self.assertIn(b'OPENROUTER_API_KEY=private-key\n', result)
+            lines = result.splitlines()
+            self.assertIn(b'GOOGLE_CLOUD_PROJECT=refined-outlet-249712', lines)
+            self.assertIn(b'VERTEX_AI_MODEL=gemini-3.5-flash-lite', lines)
+            self.assertIn(b'OPENROUTER_API_KEY=private-key', lines)
 
     def test_vertex_selection_rejects_conflicting_project_without_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -215,7 +220,7 @@ class DeploymentArchiveTests(unittest.TestCase):
             self.assertIn(original_model, environment.read_bytes())
             self.assertNotIn(b'VERTEX_AI_MODEL=gemini-3.5-flash-lite\n', environment.read_bytes())
 
-    def test_new_production_environment_defaults_to_vertex(self):
+    def test_new_production_environment_defaults_to_free_self_hosted_ollama(self):
         with tempfile.TemporaryDirectory() as directory:
             secrets_dir = Path(directory) / 'secrets'
             with patch.object(runtime, 'SECRETS', secrets_dir), patch.object(
@@ -223,7 +228,8 @@ class DeploymentArchiveTests(unittest.TestCase):
             ):
                 runtime.environment('example.com')
             result = (secrets_dir / 'production.env').read_text()
-            self.assertIn('OCR_PROVIDER=vertex\n', result)
+            self.assertIn('OCR_PROVIDER=ollama\n', result)
+            self.assertIn('OLLAMA_MODEL=openbmb/minicpm-ocr1.0\n', result)
             self.assertIn('GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n', result)
             self.assertIn('VERTEX_AI_MODEL=gemini-3.5-flash-lite\n', result)
 
@@ -336,7 +342,8 @@ class DeploymentArchiveTests(unittest.TestCase):
                     runtime.select_ocr_provider('openrouter')
             self.assertIn('openrouter', output.getvalue())
             self.assertNotIn('private-key', output.getvalue())
-            self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
+            if os.name != 'nt':
+                self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == '__main__':

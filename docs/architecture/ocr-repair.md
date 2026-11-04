@@ -6,9 +6,9 @@ The self-hosted MiniCPM request uses a 4096 token context, one CPU thread, and p
 
 ## Design
 
-Keep the caller contract unchanged: the existing upload API and review flow call `extract_card(images)`. Put provider-specific behavior behind that function. MiniCPM's documented Text Recognition task returns recognized text, which the application parses conservatively into card fields. Vertex AI Gemini and OpenRouter keep the image-to-structured-JSON path. New GCP production environments select Vertex AI with `gemini-3.5-flash-lite`; local Compose keeps its current OpenRouter default. The MiniCPM path remains available to staff through the Ollama provider.
+Keep the caller contract unchanged: the existing upload API and review flow call `extract_card(images)`. Put provider-specific behavior behind that function. MiniCPM's documented Text Recognition task returns recognized text, which the application parses conservatively into card fields. Vertex AI Gemini and OpenRouter keep the image-to-structured-JSON path. GCP production defaults to the self-hosted MiniCPM model through Ollama; local Compose retains its configured provider default. Staff can select Vertex AI or OpenRouter explicitly.
 
-Keep original image storage unchanged. Staff select `vertex`, `ollama`, or `openrouter` in the protected production environment. Vertex uses the VM service identity and the configured Google Cloud project, with no API key. The Google Cloud project is the provider destination for card images. Provider selection is explicit and applies to all card scans. Visitors cannot choose. A provider failure does not send the image to a second provider automatically. The runtime selector preserves unrelated environment bytes and any configured hosted key.
+Keep original image storage unchanged. Staff select `vertex`, `ollama`, or `openrouter` in the protected production environment. The GCP default uses the Apache-2.0 model on the VM, with no inference API key or hosted inference charge. Vertex uses the VM service identity and the configured Google Cloud project. Provider selection is explicit and applies to all card scans. Visitors cannot choose. A provider failure does not send the image to a second provider automatically. The runtime selector preserves unrelated environment bytes and any configured hosted key.
 
 ## Alternatives and risks
 

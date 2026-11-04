@@ -13,6 +13,7 @@ from app.api.v1.routes.ocr import router
 from app.core import rate_limit
 from app.core.config import settings
 from app.services.storage.business_cards import BusinessCardStorage
+from app.services.vision.exceptions import VisionUnavailable
 
 
 class OCRProviderAPITests(unittest.TestCase):
@@ -74,11 +75,16 @@ class OCRProviderAPITests(unittest.TestCase):
             self.assertEqual(result[field]['value'], '')
         self.assertTrue(result['warnings'])
 
-    def test_template_is_rejected_and_empty_ocr_is_unavailable(self):
+    def test_template_is_rejected_and_empty_ocr_preserves_image_for_manual_review(self):
         result = self.scan('BUSINESS CARD TEMPLATE\nYour Name\nCompany Logo', [self.image()])
         self.assertTrue(result['is_template'])
         self.assertEqual(result['full_name']['value'], '')
-        with patch('app.services.vision.client.urlopen', return_value=self.response('')):
+        with patch('app.api.v1.routes.ocr.extract_card', side_effect=VisionUnavailable):
             response = self.client.post('/api/v1/ocr/business-card', files={'files': ('synthetic.png', self.image(), 'image/png')},
                                         data={'ai_processing_consent': 'true'})
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result['ocr_status'], 'unavailable')
+        token = result['business_card_tokens']['front']
+        self.assertEqual(self.storage.staging_path(token).read_bytes(), self.image())
+        self.storage.delete_staged(token)

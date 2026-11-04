@@ -210,12 +210,14 @@ function CardUpload() {
 }
 
 function CardReview() {
-  const draft = JSON.parse(sessionStorage.getItem('latentsig-card-draft') || '{}') as Record<string, unknown> & { is_template?: boolean; warnings?: string[] }
+  const draft = JSON.parse(sessionStorage.getItem('latentsig-card-draft') || '{}') as Record<string, unknown> & { is_template?: boolean; warnings?: string[]; ocr_status?: string; ocr_notice?: string }
   const fields = [['Full name','full_name'],['Company','company'],['Job title','job_title'],['Email address','email'],['Phone','phone'],['Website','website'],['Business address','address']]
   const scanNeedsRefresh = typeof draft.is_template !== 'boolean'
   const values = Object.fromEntries(fields.map(([, key]) => [key, scanNeedsRefresh ? '' : (draft[key] as {value?: string} | undefined)?.value || '']))
   const warning = scanNeedsRefresh
     ? 'This saved scan predates template checking, so its extracted values have been cleared. Go back and scan the image again, or enter your details manually.'
+    : draft.ocr_status === 'unavailable'
+    ? draft.ocr_notice || 'Automatic reading is unavailable. Enter your details below; your card images will be saved when you submit.'
     : draft.is_template
     ? draft.warnings?.[0] || 'This image looks like a card template or mockup. Upload a photo of your completed business card to extract real contact details.'
     : draft.warnings?.join(' ')

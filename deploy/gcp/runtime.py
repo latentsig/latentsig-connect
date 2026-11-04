@@ -211,7 +211,7 @@ def environment(domain):
         'GOOGLE_REDIRECT_URI': f'https://{domain}/api/v1/auth/google/callback',
         'ADMIN_EMAIL_ALLOWLIST': 'raksha@latentsig.com,bhoomika@latentsig.com,bharat@latentsig.com,info@latentsig.com,shauryasharthak@latentsig.com',
         'INITIAL_ADMIN_EMAILS': ','.join(ADMINS), 'OCR_ENABLED': 'true',
-        'OCR_PROVIDER': 'vertex', 'GOOGLE_CLOUD_PROJECT': 'refined-outlet-249712',
+        'OCR_PROVIDER': 'ollama', 'GOOGLE_CLOUD_PROJECT': 'refined-outlet-249712',
         'VERTEX_AI_MODEL': 'gemini-3.5-flash-lite',
         'OLLAMA_BASE_URL': 'http://ollama:11434',
         'OLLAMA_MODEL': 'openbmb/minicpm-ocr1.0', 'OCR_TIMEOUT_SECONDS': '85',

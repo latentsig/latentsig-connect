@@ -17,6 +17,7 @@ mkdir -p /opt/latentsig-connect
 rsync -a --delete --exclude=.env "$staging/" /opt/latentsig-connect/
 cd /opt/latentsig-connect
 python3 deploy/gcp/runtime.py environment "$domain"
+python3 deploy/gcp/runtime.py ocr-provider ollama
 ln -sfn /srv/latentsig-connect/secrets/production.env .env
 printf 'BACKUP_BUCKET=%s\n' "$bucket" > /etc/latentsig-connect.conf
 chmod 600 /etc/latentsig-connect.conf

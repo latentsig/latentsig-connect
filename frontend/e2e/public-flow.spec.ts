@@ -10,7 +10,7 @@ async function acceptNotice(page: Page, allowFollowUp = true) {
 }
 
 async function acceptAiImageNotice(page: Page) {
-  const checkbox = page.getByRole('checkbox', { name: /I agree to send this card image/ })
+  const checkbox = page.getByRole('checkbox', { name: /may process this card image/i })
   if (await checkbox.count()) await checkbox.check()
 }
 
@@ -50,7 +50,7 @@ test('mobile visitor can select email type and country, then submit a lead', asy
   await expect(page.getByRole('link', { name: /continue on whatsapp/i })).toHaveAttribute('href', /^https:\/\/wa\.me\//)
 })
 
-test('manual submission explains API failure and card scan offers recovery', async ({ page }) => {
+test('manual submission explains API failure and OCR outage preserves card images for review', async ({ page }) => {
   await page.route('**/api/v1/leads', route => route.abort())
   await page.goto('/connect/manual')
   await page.getByPlaceholder('e.g. Rachel Thomas').fill('Offline Review Contact')
@@ -66,13 +66,22 @@ test('manual submission explains API failure and card scan offers recovery', asy
   await expect(page.getByPlaceholder('e.g. Rachel Thomas')).toBeVisible()
 
   await page.unroute('**/api/v1/leads')
-  await page.route('**/api/v1/ocr/business-card', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ detail: 'Card scanning is temporarily unavailable.' }) }))
+  await page.route('**/api/v1/ocr/business-card', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+    full_name: { value: '', confidence: 0 }, company: { value: '', confidence: 0 }, job_title: { value: '', confidence: 0 },
+    email: { value: '', confidence: 0 }, email_type: { value: 'work', confidence: 0 }, email_candidates: [],
+    phone: { value: '', confidence: 0 }, phone_country: { value: '', name: '', calling_code: '', confidence: 0 },
+    website: { value: '', confidence: 0 }, address: { value: '', confidence: 0 }, candidates: { emails: [], phones: [], websites: [] },
+    ocr_text: '', text_blocks: [], is_template: false, warnings: [], uncertain_fields: [], ocr_status: 'unavailable',
+    ocr_notice: 'We couldn’t read the card automatically. Enter or correct your details below; both card images will be saved when you submit.',
+    business_card_tokens: { front: 'front-stage-token' }, business_card_token: 'front-stage-token',
+  }) }))
   await page.goto('/connect/card')
   await page.locator('input[type=file]').nth(1).setInputFiles('../logo.png')
   await acceptAiImageNotice(page)
   await page.getByRole('button', { name: 'Scan business card' }).click()
-  await expect(page.getByRole('alert')).toContainText(/card scanning is temporarily unavailable/i)
-  await expect(page.getByRole('button', { name: 'Scan business card' })).toBeEnabled()
+  await expect(page).toHaveURL(/\/connect\/card\/review$/)
+  await expect(page.getByRole('status')).toContainText(/both card images will be saved when you submit/i)
+  await expect(page.getByPlaceholder('e.g. Rachel Thomas')).toBeVisible()
 })
 
 test('Other interest asks for details and the team can review them on the lead', async ({ page }) => {

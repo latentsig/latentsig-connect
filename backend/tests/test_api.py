@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.db.models import Event, IntegrationJob, Interaction, Lead, User
+from app.db.models import BusinessCard, Event, IntegrationJob, Interaction, Lead, User
 from app.db.session import get_db
 from app.core.config import Settings, settings
 from app.core import rate_limit as rate_limit_module
@@ -23,6 +23,8 @@ from app.core.passwords import hash_password
 from app.main import app
 from app.services.integrations import worker
 from app.services.backup import create_backup
+from app.services.storage.business_cards import storage
+from app.services.vision.exceptions import VisionUnavailable
 
 
 class LeadApiTests(unittest.TestCase):
@@ -226,6 +228,56 @@ class LeadApiTests(unittest.TestCase):
         mismatch = self.client.post("/api/v1/ocr/business-card", files={"files": ("card.png", valid_jpeg.getvalue(), "image/png")}, data={"ai_processing_consent": "true"})
         self.assertEqual(unsupported.status_code, 415)
         self.assertEqual(mismatch.status_code, 415)
+
+    def test_ocr_failure_keeps_both_images_for_manual_review_and_admin_storage(self):
+        front = io.BytesIO()
+        Image.new("RGB", (320, 180), "white").save(front, format="JPEG")
+        back = io.BytesIO()
+        Image.new("RGB", (320, 180), "white").save(back, format="PNG")
+        front_bytes, back_bytes = front.getvalue(), back.getvalue()
+
+        extraction = None
+        stored_paths = []
+        try:
+            with patch("app.api.v1.routes.ocr.extract_card", side_effect=VisionUnavailable):
+                scan = self.client.post(
+                    "/api/v1/ocr/business-card",
+                    files=[
+                        ("files", ("front.jpg", front_bytes, "image/jpeg")),
+                        ("files", ("back.png", back_bytes, "image/png")),
+                    ],
+                    data={"ai_processing_consent": "true"},
+                )
+            self.assertEqual(scan.status_code, 200, scan.text)
+            extraction = scan.json()
+            self.assertEqual(extraction["ocr_status"], "unavailable")
+            self.assertEqual(set(extraction["business_card_tokens"]), {"front", "back"})
+            self.assertTrue(all(storage.staging_path(token).is_file() for token in extraction["business_card_tokens"].values()))
+
+            submission = self.submit(
+                full_name="Synthetic OCR Test",
+                company="Synthetic Test Company",
+                email="synthetic-ocr@example.com",
+                phone="+14155552679",
+                capture_method="business_card",
+                business_card_token=extraction["business_card_tokens"]["front"],
+                business_card_back_token=extraction["business_card_tokens"]["back"],
+                business_card_ocr=extraction,
+            )
+            self.assertEqual(submission.status_code, 201, submission.text)
+            with self.TestSession() as db:
+                card = db.scalar(select(BusinessCard).where(BusinessCard.lead_id == uuid.UUID(submission.json()["id"])))
+                self.assertIsNotNone(card)
+                self.assertIsNotNone(card.back_storage_path)
+                stored_paths.extend([card.storage_path, card.back_storage_path])
+                self.assertEqual(storage.read(card.storage_path), front_bytes)
+                self.assertEqual(storage.read(card.back_storage_path), back_bytes)
+        finally:
+            if extraction:
+                for token in extraction.get("business_card_tokens", {}).values():
+                    storage.delete_staged(token)
+            for path in stored_paths:
+                storage.delete(path)
 
     def test_sheets_worker_retries_failure_without_losing_the_lead(self):
         submission = self.submit()

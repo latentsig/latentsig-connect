@@ -40,6 +40,18 @@ def _extract(images: list[tuple[bytes, str]]) -> dict[str, object]:
     }
 
 
+def _manual_review_result(reason: str) -> dict[str, object]:
+    return {
+        "full_name": _field(None), "company": _field(None), "job_title": _field(None),
+        "email": _field(None), "email_type": _field("work"), "email_candidates": [],
+        "phone": _field(None), "phone_country": {"value": "", "name": "", "calling_code": "", "confidence": 0},
+        "website": _field(None), "address": _field(None),
+        "candidates": {"emails": [], "phones": [], "websites": []},
+        "ocr_text": "", "text_blocks": [], "is_template": False,
+        "warnings": [], "uncertain_fields": [], "ocr_status": "unavailable", "ocr_notice": reason,
+    }
+
+
 @router.post("/business-card", dependencies=[Depends(rate_limit("ocr"))])
 async def read_business_card(files: list[UploadFile] = File(default=[]), file: UploadFile | None = File(default=None), ai_processing_consent: bool = Form(default=False)):
     uploads = files or ([file] if file else [])
@@ -69,9 +81,9 @@ async def read_business_card(files: list[UploadFile] = File(default=[]), file: U
             data_by_side.append((side, upload, data, mime_type))
         if not ai_processing_consent:
             raise HTTPException(status_code=422, detail="Please agree to AI processing of your card image before scanning it.")
-        # Decode each image locally before sending it to the configured OCR service.
+        # Validate first, then stage the originals before inference so a temporary
+        # OCR outage cannot discard the visitor's uploaded card images.
         prepared_images = [await run_in_threadpool(decode_and_prepare, item[2]) for item in data_by_side]
-        result = await run_in_threadpool(_extract, [(image, "image/jpeg") for image in prepared_images])
         consent_at = datetime.now(timezone.utc).isoformat()
         tokens: dict[str, str] = {}
         for side, upload, data, mime_type in data_by_side:
@@ -81,6 +93,24 @@ async def read_business_card(files: list[UploadFile] = File(default=[]), file: U
             })
             tokens[side] = token
             staged_tokens.append(token)
+        try:
+            result = await run_in_threadpool(_extract, [(image, "image/jpeg") for image in prepared_images])
+            result["ocr_status"] = "complete"
+        except VisionConfigurationError:
+            logger.warning("Card OCR is not configured; preserving staged images for manual review")
+            result = _manual_review_result(
+                "Automatic reading is unavailable. Enter your details below; your card images will be saved when you submit."
+            )
+        except VisionUnavailable:
+            logger.warning("Card OCR provider is unavailable; preserving staged images for manual review")
+            result = _manual_review_result(
+                "We couldn’t read the card automatically. Enter or correct your details below; your card images will be saved when you submit."
+            )
+        except Exception:
+            logger.exception("Card OCR processing failed; preserving staged images for manual review")
+            result = _manual_review_result(
+                "Automatic reading failed. Enter or correct your details below; your card images will be saved when you submit."
+            )
         result["business_card_tokens"] = tokens
         result["business_card_token"] = tokens["front"]
         return result
@@ -88,19 +118,13 @@ async def read_business_card(files: list[UploadFile] = File(default=[]), file: U
         raise
     except InvalidImage as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    except VisionConfigurationError:
-        raise HTTPException(status_code=503, detail="Business-card scanning is not configured. You can enter your details manually.") from None
-    except VisionUnavailable:
-        for token in staged_tokens:
-            storage.delete_staged(token)
-        raise HTTPException(status_code=503, detail="Card scanning is temporarily unavailable. Your image was not saved; you can retry or enter your details manually.") from None
     except Exception:
         for token in staged_tokens:
             storage.delete_staged(token)
         logger.exception("Business-card extraction failed")
         raise HTTPException(
             status_code=503,
-            detail="Card scanning is temporarily unavailable. You can retry or enter your details manually.",
+            detail="Card upload could not be saved. Please retry or enter your details manually.",
         ) from None
     finally:
         for upload in uploads:
