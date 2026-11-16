@@ -37,7 +37,7 @@ test('research workspace separates worksheets and searches unified attendee prof
   const events = await (await eventsResponse).json()
   const bts = events.find((event: { slug: string }) => event.slug === 'bts-2026')
   expect(bts).toBeTruthy()
-  await expect(page.getByLabel('Event', { exact: true })).toHaveValue(bts.id)
+  await expect(page.locator('.research-toolbar').getByRole('combobox')).toHaveValue(bts.id)
   await expect(page.getByRole('heading', { name: 'Research records' })).toBeVisible()
   const sheetsResponse = await page.request.get(`/api/v1/admin/events/${bts.id}/research/sheets`)
   const summary = await sheetsResponse.json()
