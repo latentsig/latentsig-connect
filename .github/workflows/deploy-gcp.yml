@@ -68,6 +68,13 @@ jobs:
             --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
             --command="sudo bash /opt/latentsig-connect/deploy/gcp/deploy.sh /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz $PUBLIC_DOMAIN $GCP_BACKUP_BUCKET"
 
+      - name: Issue or renew production TLS certificate
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
+            --command="sudo bash /opt/latentsig-connect/deploy/gcp/operations.sh issue-tls"
+
       - name: Verify configured OCR provider
         run: |
           set -euo pipefail
