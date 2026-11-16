@@ -31,7 +31,7 @@ Audit date: 2026-11-16
 
 ## Implementation progress — local review only
 
-Implementation started from the audited `main` checkout at `95579b61c2dbfcfc1f1383479df48ef4cb47259a` and is being published on the existing `Event-Workspace` branch. The API and frontend preview are available at [http://localhost:5173/admin/research](http://localhost:5173/admin/research). No production or GCP services were changed.
+Implementation started from the audited `main` checkout at `95579b61c2dbfcfc1f1383479df48ef4cb47259a` and is published on the existing `Event-Workspace` branch at `de3cee9`. The API and frontend preview are available at [http://localhost:5173/admin/research](http://localhost:5173/admin/research). No production or GCP services were changed.
 
 ### Implemented in this slice
 
