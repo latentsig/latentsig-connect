@@ -221,6 +221,32 @@ class Meeting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
+class EventEncounter(Base):
+    __tablename__ = "event_encounters"
+    __table_args__ = (Index("ix_event_encounters_event_identity", "event_id", "identity_key"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    registrant_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("event_registrants.id", ondelete="SET NULL"), nullable=True, index=True)
+    identity_key: Mapped[str] = mapped_column(String(700), index=True)
+    lead_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("leads.id", ondelete="SET NULL"), nullable=True, index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("event_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    employee_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    encounter_type: Mapped[str] = mapped_column(String(30), index=True)
+    encountered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    topics: Mapped[list[str]] = mapped_column(JSON, default=list)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    demo_presented: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(30), default="completed", index=True)
+    next_steps: Mapped[str] = mapped_column(Text, default="")
+    follow_up_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    synthetic_test: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    exclude_from_analytics: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 class ResearchImportBatch(Base):
     __tablename__ = "research_import_batches"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)

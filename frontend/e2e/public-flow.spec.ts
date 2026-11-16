@@ -27,7 +27,7 @@ test('event QR landing offers card scan or manual entry and preserves attributio
   await expect(page.getByRole('button', { name: /i'll enter my details instead/i })).toBeVisible()
 })
 
-test('research workspace defaults to BTS 2026 and explains when it has no records', async ({ page }) => {
+test('research workspace separates worksheets and searches unified attendee profiles', async ({ page }) => {
   await page.goto('/admin/login')
   await page.getByPlaceholder('name@latentsig.com').fill('bhoomika@latentsig.com')
   await page.getByRole('button', { name: 'Sign in' }).click()
@@ -37,24 +37,189 @@ test('research workspace defaults to BTS 2026 and explains when it has no record
   const events = await (await eventsResponse).json()
   const bts = events.find((event: { slug: string }) => event.slug === 'bts-2026')
   expect(bts).toBeTruthy()
-  await expect(page.getByLabel('Event')).toHaveValue(bts.id)
-  await expect(page.getByRole('heading', { name: 'Imported registrants' })).toBeVisible()
-  const importsResponse = await page.request.get(`/api/v1/admin/events/${bts.id}/research/imports`)
-  const imports = await importsResponse.json()
-  if (!imports.length) await expect(page.getByText('No research workbook has been imported for this event yet.')).toBeVisible()
-  if (imports[0]?.status === 'imported' && imports[0].row_count > 50) {
-    await expect(page.locator('.research-results-meta')).toContainText(`of ${imports[0].row_count} registrant rows`)
-    await page.getByRole('button', { name: 'Next registrant page' }).click()
-    await expect(page.locator('.research-results-meta')).toContainText('Showing 51–100 of')
+  await expect(page.getByLabel('Event', { exact: true })).toHaveValue(bts.id)
+  await expect(page.getByRole('heading', { name: 'Research records' })).toBeVisible()
+  const sheetsResponse = await page.request.get(`/api/v1/admin/events/${bts.id}/research/sheets`)
+  const summary = await sheetsResponse.json()
+  if (!summary.sheets.length) {
+    await expect(page.getByText('No research workbook has been imported for this event yet.')).toBeVisible()
+    return
   }
-  if (imports[0]?.status === 'imported' && imports[0].sheet_names.length) {
-    const worksheet = imports[0].sheet_names[0]
-    const filtered = await page.request.get(`/api/v1/admin/events/${bts.id}/research/registrants?sheet=${encodeURIComponent(worksheet)}&page_size=1`)
-    const total = (await filtered.json()).total
-    await page.locator('.research-sheet-filter').selectOption(worksheet)
-    await expect(page.locator('.research-results-meta')).toContainText(`of ${total} registrant rows`)
-    await expect(page.locator('.research-results-meta')).toContainText(worksheet)
+  for (const sheet of summary.sheets) {
+    const label = sheet.sheet_name.toLowerCase() === 'registrants' ? 'All registrants' : sheet.sheet_name
+    await expect(page.getByRole('tab', { name: new RegExp(label) })).toBeVisible()
+    await expect(page.getByRole('tab', { name: new RegExp(label) })).toContainText(sheet.row_count.toLocaleString())
   }
+  for (const width of [320, 375, 390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 900 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  }
+  const registrantsSheet = summary.sheets.find((sheet: { sheet_name: string }) => sheet.sheet_name.toLowerCase() === 'registrants')
+  if (registrantsSheet) {
+    const firstPage = await page.request.get(`/api/v1/admin/events/${bts.id}/research/registrants?sheet=Registrants&page_size=1`)
+    const firstRow = (await firstPage.json()).items[0]
+    expect(firstRow).toBeTruthy()
+    await expect(page.locator('.research-results-meta')).toContainText(`${registrantsSheet.row_count.toLocaleString()} rows in Registrants`)
+    await page.getByRole('button', { name: 'Search across all worksheets' }).click()
+    await page.getByPlaceholder(/Search Profile ID, name, company, title/).fill(firstRow.profile_id)
+    const person = page.locator('.research-attendee-card').first()
+    await expect(person).toContainText(firstRow.profile_id)
+    await person.getByRole('button', { name: 'View profile' }).click()
+    await expect(page.getByRole('dialog', { name: 'Research attendee profile' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Worksheet memberships' })).toBeVisible()
+  }
+})
+
+test('event workspace shows explicit priorities, overdue follow-ups, and review queues', async ({ page }) => {
+  const dueAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  await page.route('**/priority-panels', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+    must_meet_next: { total: 2, priority_counts: { A: 1, B: 1 }, items: [
+      { registrant_id: 'target-a', profile_id: 'PROFILE-A', full_name: 'Priority A Contact', company: 'Alpha Systems', sheet_name: 'Strong shortlist', priority: 'A', relationship: 'Client', fit: 'Strong', pitch: 'Review the A priority source note.' },
+      { registrant_id: 'target-b', profile_id: 'PROFILE-B', full_name: 'Priority B Contact', company: 'Beta Systems', sheet_name: 'Strong shortlist', priority: 'B', relationship: 'Design Partner', fit: 'Strong' },
+    ] },
+    research_opportunities: { total: 1, items: [{ registrant_id: 'opportunity-1', profile_id: 'PROFILE-C', full_name: 'Partner Contact', company: 'Partner Systems', sheet_name: 'Design Partners', relationship: 'Design Partner', fit: 'Strong', pitch: 'Explore the source-backed partnership.' }] },
+    follow_ups: { total: 1, items: [{ id: 'follow-up-1', kind: 'research_meeting', registrant_id: 'target-a', full_name: 'Priority A Contact', company: 'Alpha Systems', due_at: dueAt, status: 'requested', owner: 'Bhoomika', next_steps: 'Send the agenda.' }] },
+    needs_review: { reconciliation_rows: 1, pending_card_captures: 1,
+      reconciliation_items: [{ id: 'review-row-1', full_name: 'Review Contact', company: 'Review Systems', sheet_name: 'Strong shortlist', source_row: 12, errors: ['Missing Profile ID'] }],
+      card_capture_items: [{ id: 'capture-1', status: 'pending_match', captured_at: dueAt, filename: 'visitor-card.jpg', name: 'Card Contact' }],
+    },
+  }) }))
+  await page.goto('/admin/login')
+  await page.getByPlaceholder('name@latentsig.com').fill('bharat@latentsig.com')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page).toHaveURL(/\/admin\/dashboard$/)
+  await page.goto('/admin/events')
+  const bts = page.locator('.workspace-event-card').filter({ hasText: 'Bengaluru Tech Summit 2026' })
+  await bts.getByRole('link', { name: 'Open workspace' }).click()
+  const eventTabs = page.getByRole('navigation', { name: 'Event workspace' })
+  await expect(eventTabs.getByRole('link')).toHaveCount(8)
+  await expect(eventTabs.getByRole('link', { name: 'Overview' })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByText('A 1 · B 1')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Must Meet Next' })).toBeVisible()
+  await expect(page.locator('.event-priority-panel').filter({ has: page.getByRole('heading', { name: 'Must Meet Next' }) }).getByText('Priority A', { exact: true })).toBeVisible()
+  await expect(page.locator('.event-priority-panel').filter({ has: page.getByRole('heading', { name: 'Must Meet Next' }) }).getByText('Priority B', { exact: true })).toBeVisible()
+  await expect(page.getByText('Follow-up Today')).toBeVisible()
+  await expect(page.getByText('Send the agenda.')).toBeVisible()
+  await expect(page.getByText('Missing Profile ID')).toBeVisible()
+  await expect(page.getByText('pending match')).toBeVisible()
+  await eventTabs.getByRole('link', { name: 'Days & Sessions' }).click()
+  await expect(page).toHaveURL(/#sessions$/)
+  await expect(page.getByRole('heading', { name: 'Days & Sessions' })).toBeVisible()
+  for (const width of [320, 375, 390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 900 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  }
+})
+
+test('research import preview shows checksum, identity coverage, warnings, and rollback state', async ({ page }) => {
+  await page.route('**/api/v1/admin/events', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([
+    { id: 'quality-event', name: 'Quality Review Event', slug: 'quality-review', is_active: true },
+  ]) }))
+  await page.route('**/api/v1/admin/events/quality-event/research/imports', async route => {
+    if (route.request().method() !== 'POST') return route.fulfill({ status: 200, contentType: 'application/json', body: '[]' })
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({
+      id: 'quality-preview', original_filename: 'research.xlsx', file_sha256: 'a'.repeat(64), status: 'preview',
+      row_count: 5, sheet_names: ['Registrants', 'Strong shortlist'], error_count: 2,
+      errors: [{ sheet_name: 'Strong shortlist', source_row: 5, message: 'Missing Profile ID' }],
+      sheets: [
+        { sheet_name: 'Registrants', columns: ['Profile ID', 'Name'], rows: 3, errors: 0 },
+        { sheet_name: 'Strong shortlist', columns: ['Profile ID', 'Name'], rows: 2, errors: 2 },
+      ],
+      quality: { unique_profile_ids_in_registrants: 2, repeated_profile_ids_across_sheets: 1, missing_profile_id_rows: 1, warning_count: 2 },
+      rollback_available: false, macros_executed: false,
+    }) })
+  })
+  await page.route('**/api/v1/admin/events/quality-event/research/sheets', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ batch_id: null, original_filename: null, row_count: 0, sheets: [] }) }))
+  await page.goto('/admin/login')
+  await page.getByPlaceholder('name@latentsig.com').fill('bharat@latentsig.com')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page).toHaveURL(/\/admin\/dashboard$/)
+  await page.goto('/admin/research?eventId=quality-event')
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'research.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: Buffer.from('intercepted test workbook'),
+  })
+  await page.getByRole('button', { name: 'Preview workbook' }).click()
+  await expect(page.getByRole('heading', { name: 'research.xlsx' })).toBeVisible()
+  await expect(page.getByText('Source SHA-256')).toBeVisible()
+  await expect(page.getByText('a'.repeat(64))).toBeVisible()
+  await expect(page.getByText('Unique Profile IDs in Registrants')).toBeVisible()
+  await expect(page.getByText('Repeated Profile IDs across worksheets')).toBeVisible()
+  await expect(page.getByText('Rows missing Profile ID')).toBeVisible()
+  await expect(page.getByText('preview · rollback unavailable until import')).toBeVisible()
+  await expect(page.getByText(/Profile IDs are source identifiers and are not independently verified/)).toBeVisible()
+})
+
+test('research attendee supports meeting actions without creating a lead', async ({ page }) => {
+  await page.goto('/admin/login')
+  await page.getByPlaceholder('name@latentsig.com').fill('bhoomika@latentsig.com')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page).toHaveURL(/\/admin\/dashboard$/)
+  const eventsResponse = page.waitForResponse(response => response.url().endsWith('/api/v1/admin/events') && response.ok())
+  await page.goto('/admin/research')
+  const events = await (await eventsResponse).json()
+  const bts = events.find((event: { slug: string }) => event.slug === 'bts-2026')
+  expect(bts).toBeTruthy()
+  await page.getByRole('navigation', { name: 'Event workspace' }).getByRole('link', { name: 'Attendees' }).click()
+  await expect(page).toHaveURL(/view=attendees/)
+  await expect(page.getByRole('button', { name: 'Global search active' })).toBeVisible()
+  const response = await page.request.get(`/api/v1/admin/events/${bts.id}/research/registrants?sheet=Registrants&page_size=1`)
+  const firstRow = (await response.json()).items[0]
+  expect(firstRow?.profile_id).toBeTruthy()
+  const actions: Record<string, unknown>[] = []
+  const createdEncounters: Record<string, unknown>[] = []
+  const updates: Record<string, unknown>[] = []
+  await page.route(`**/api/v1/admin/events/${bts.id}/research/attendees/*/encounters`, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(createdEncounters) }))
+  await page.route(`**/api/v1/admin/events/${bts.id}/encounters`, async route => {
+    const payload = route.request().postDataJSON() as Record<string, unknown>
+    actions.push(payload)
+    const created = { id: `synthetic-${actions.length}`, event_id: bts.id, registrant_id: payload.registrant_id, lead_id: null, profile_id: firstRow.profile_id, full_name: firstRow.full_name, company: firstRow.company, employee_id: payload.employee_id, employee_name: 'Admin User', encounter_type: payload.encounter_type, status: payload.status, encountered_at: new Date().toISOString(), scheduled_at: payload.scheduled_at || null, topics: payload.topics || [], notes: payload.notes || '', demo_presented: payload.demo_presented || false, next_steps: payload.next_steps || '', follow_up_due_at: payload.follow_up_due_at || null, synthetic_test: true }
+    createdEncounters.push(created)
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify(created),
+    })
+  })
+  await page.route('**/api/v1/admin/event-encounters/*', async route => {
+    const id = route.request().url().split('/').pop() || ''
+    const item = createdEncounters.find(encounter => encounter.id === id)
+    const changes = route.request().postDataJSON() as Record<string, unknown>
+    updates.push(changes)
+    if (item) Object.assign(item, changes)
+    await route.fulfill({ status: item ? 200 : 404, contentType: 'application/json', body: JSON.stringify(item || { detail: 'Event encounter not found.' }) })
+  })
+  await page.getByPlaceholder(/Search Profile ID, name, company, title/).fill(firstRow.profile_id)
+  await page.locator('.research-attendee-card').first().getByRole('button', { name: 'View profile' }).click()
+  for (const width of [320, 375, 390, 768]) {
+    await page.setViewportSize({ width, height: 900 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  }
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.getByRole('button', { name: 'Mark Met' }).click()
+  await expect(page.getByText('Event action recorded.')).toBeVisible()
+  expect(actions[0]).toMatchObject({ registrant_id: firstRow.id, encounter_type: 'met', status: 'completed' })
+  expect(actions[0]).not.toHaveProperty('lead_id')
+
+  await page.getByRole('button', { name: 'Schedule Meeting' }).click()
+  for (const width of [320, 375, 390, 768]) {
+    await page.setViewportSize({ width, height: 900 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  }
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.getByLabel('Topics').fill('Agentic AI')
+  await page.getByLabel('Notes').fill('Reviewed the research opportunity.')
+  await page.getByLabel('Next steps').fill('Send the demo outline.')
+  await page.getByLabel('Follow-up due').fill('2026-11-20')
+  await page.getByRole('button', { name: 'Confirm meeting' }).click()
+  await expect.poll(() => actions.length).toBe(2)
+  expect(actions[1]).toMatchObject({ registrant_id: firstRow.id, encounter_type: 'meeting', status: 'confirmed', topics: ['Agentic AI'], notes: 'Reviewed the research opportunity.', next_steps: 'Send the demo outline.' })
+  const meetingStatus = page.getByRole('combobox', { name: /Status for research meeting/ })
+  await expect(meetingStatus).toHaveValue('confirmed')
+  await meetingStatus.selectOption('completed')
+  await expect.poll(() => updates.length).toBe(1)
+  expect(updates[0]).toEqual({ status: 'completed' })
+  await expect(meetingStatus).toHaveValue('completed')
 })
 
 test('mobile visitor can select email type and country, then submit a lead', async ({ page }) => {
@@ -247,12 +412,12 @@ test('team member can sign in and admins can review captured leads', async ({ pa
   const meetingResponse = page.waitForResponse(response => response.request().method() === 'POST' && response.url().match(/\/api\/v1\/admin\/leads\/[^/]+\/meetings$/) !== null && response.status() === 201)
   await page.getByRole('button', { name: 'Record meeting' }).click()
   const meeting = await (await meetingResponse).json()
-  await expect(page.getByText(/requested · Bhoomika/)).toBeVisible()
-  await expect(page.getByText('Share the demo deck.')).toBeVisible()
+  await expect(page.getByText(/requested · Bhoomika/).first()).toBeVisible()
+  await expect(page.getByText('Share the demo deck.').first()).toBeVisible()
   const confirmMeeting = page.waitForResponse(response => response.request().method() === 'PATCH' && response.url().endsWith(`/api/v1/admin/meetings/${meeting.id}`) && response.status() === 200)
   await page.getByLabel(`Status for meeting ${meeting.id}`).selectOption('confirmed')
   await confirmMeeting
-  await expect(page.getByText(/confirmed · Bhoomika/)).toBeVisible()
+  await expect(page.getByText(/confirmed · Bhoomika/).first()).toBeVisible()
   await page.getByRole('button', { name: /sign out/i }).click()
   await page.getByPlaceholder('name@latentsig.com').fill('bhoomika@latentsig.com')
   await page.getByRole('button', { name: 'Sign in' }).click()
@@ -435,6 +600,96 @@ test('admin can flag template card scans as synthetic and they require identity 
   await expect(page.getByRole('button', { name: 'Save as lead' })).toBeDisabled()
   expect(uploadBody).toContain('name="synthetic_test"\r\n\r\ntrue')
   expect(uploadBody).toContain('name="event_id"\r\n\r\n')
+})
+
+test('admin capture inbox filters by event and status and gives the next review action', async ({ page }) => {
+  const requests: URLSearchParams[] = []
+  await page.route('**/api/v1/admin/card-captures*', async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/thumbnail')) return route.fulfill({ status: 404, body: '' })
+    if (route.request().method() !== 'GET') return route.continue()
+    requests.push(url.searchParams)
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      total: 1,
+      page: Number(url.searchParams.get('page') || '1'),
+      page_size: 25,
+      items: [{
+        id: 'c46c5f49-21fd-4078-b82d-4c2edeb02015',
+        event_id: 'bts-event',
+        event_name: 'Bengaluru Tech Summit 2026',
+        original_filename: 'visitor-card.jpg',
+        status: 'pending_match',
+        ocr: { full_name: 'Jhon Michai', company: 'Design Studio' },
+        lead_name: null,
+        lead_id: null,
+        captured_by: 'Bhoomika',
+        created_at: '2026-11-16T10:00:00+00:00',
+        synthetic_test: false,
+        candidates: [],
+      }],
+    }) })
+  })
+  await page.goto('/admin/login')
+  await page.getByPlaceholder('name@latentsig.com').fill('bharat@latentsig.com')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page).toHaveURL(/\/admin\/dashboard$/)
+  await page.goto('/admin/card-capture')
+  await expect(page.getByRole('heading', { name: 'Recent card captures' })).toBeVisible()
+  await expect(page.getByText('Jhon Michai', { exact: true })).toBeVisible()
+  await expect(page.getByText(/Bhoomika/)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Resolve possible match' })).toBeVisible()
+
+  await page.getByLabel('Filter captures by status').selectOption('pending_match')
+  await expect.poll(() => requests.some(query => query.get('status') === 'pending_match')).toBe(true)
+  const eventFilter = page.getByLabel('Filter captures by event')
+  await eventFilter.selectOption({ label: 'Bengaluru Tech Summit 2026' })
+  const selectedEventId = await eventFilter.inputValue()
+  await expect.poll(() => requests.some(query => query.get('event_id') === selectedEventId)).toBe(true)
+  await page.getByRole('checkbox', { name: 'Include synthetic tests' }).check()
+  await expect.poll(() => requests.some(query => query.get('include_synthetic') === 'true')).toBe(true)
+  await page.getByLabel('Filter captures by status').selectOption('new')
+  await expect.poll(() => requests.some(query => Boolean(query.get('created_after')) && !query.get('status'))).toBe(true)
+})
+
+test('staff quick manual capture reviews matches and saves an event-attributed pending record', async ({ page }) => {
+  const requests: Record<string, unknown>[] = []
+  await page.route('**/api/v1/admin/manual-captures', async route => {
+    const payload = route.request().postDataJSON() as Record<string, unknown>
+    requests.push(payload)
+    if (requests.length === 1) {
+      await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ detail: {
+        message: 'Possible matches need review. Link one record, or confirm this is a different visitor.',
+        candidates: [{ kind: 'lead', id: 'existing-lead-1', full_name: 'Jamie Manual', company: 'Example Works', email: 'jamie@example.com', confidence: 'possible', matched_by: 'name_company' }],
+      } }) })
+      return
+    }
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({
+      lead_id: 'existing-lead-1', lead_code: 'LS-BTS-000001', lead_name: 'Jamie Manual', event_id: 'bts-event',
+      event_name: 'Bengaluru Tech Summit 2026', status: 'pending_review', created_lead: false,
+      matched_research: false, captured_by: 'Admin User', captured_at: new Date().toISOString(),
+    }) })
+  })
+  await page.goto('/admin/login')
+  await page.getByPlaceholder('name@latentsig.com').fill('bharat@latentsig.com')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page).toHaveURL(/\/admin\/dashboard$/)
+  await page.goto('/admin/card-capture')
+  const quickCapture = page.locator('.quick-manual-capture')
+  await quickCapture.locator('.quick-manual-form > label').first().locator('select').selectOption({ label: 'Bengaluru Tech Summit 2026' })
+  await quickCapture.getByLabel('Name').fill('Jamie Manual')
+  await quickCapture.getByLabel('Company').fill('Example Works')
+  await quickCapture.getByLabel('Notes').fill('Asked about a product demo')
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await quickCapture.getByRole('button', { name: 'Save quick capture' }).click()
+  await expect(quickCapture.getByText(/Possible matches need review/)).toBeVisible()
+  await quickCapture.locator('.quick-manual-candidate input').check()
+  await quickCapture.getByRole('button', { name: 'Save quick capture' }).click()
+  await expect(quickCapture.getByText('Event capture linked to existing lead')).toBeVisible()
+  expect(requests).toHaveLength(2)
+  expect(requests[0]).toMatchObject({ fields: { full_name: 'Jamie Manual', company: 'Example Works' }, notes: 'Asked about a product demo' })
+  expect(requests[0]).not.toHaveProperty('data_processing_consent')
+  expect(requests[1]).toMatchObject({ lead_id: 'existing-lead-1', event_id: expect.any(String) })
 })
 
 test('Android rear-camera capture input opens the AI review step', async ({ browser }) => {

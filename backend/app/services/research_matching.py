@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.db.models import EventRegistrant, Lead
+from app.db.models import EventEncounter, EventRegistrant, Interaction, Lead
 
 
 def _norm(value: str | None) -> str:
@@ -19,6 +19,11 @@ def registrant_identity_key(registrant: EventRegistrant) -> tuple[str, str]:
     if profile_id:
         return "profile", profile_id
     return "source", (registrant.source_key or str(registrant.id)).strip().casefold()
+
+
+def registrant_identity_token(registrant: EventRegistrant) -> str:
+    identity_type, identity = registrant_identity_key(registrant)
+    return f"{identity_type}:{identity}"
 
 
 def group_registrants(registrants: Iterable[EventRegistrant]) -> dict[tuple[str, str], list[EventRegistrant]]:
@@ -43,6 +48,11 @@ def mark_registrant_identity_matched(db: Session, registrant: EventRegistrant, l
     for row in rows:
         row.matched_lead_id = lead_id
         row.match_status = "matched"
+    for encounter in db.scalars(select(EventEncounter).where(
+        EventEncounter.event_id == registrant.event_id,
+        EventEncounter.identity_key == registrant_identity_token(registrant),
+    )).all():
+        encounter.lead_id = lead_id
     return len(rows)
 
 
@@ -76,7 +86,12 @@ def find_attendee_candidates(
     phone = re.sub(r"\D", "", fields.get("phone") or "")
     name, company = _norm(fields.get("full_name")), _norm(fields.get("company"))
     results: list[dict] = []
-    leads = db.scalars(select(Lead).order_by(Lead.created_at.desc()).limit(5000)).all()
+    leads_query = select(Lead).order_by(Lead.created_at.desc()).limit(5000)
+    if event_id:
+        leads_query = select(Lead).where(Lead.id.in_(
+            select(Interaction.lead_id).where(Interaction.event_id == event_id)
+        )).order_by(Lead.created_at.desc()).limit(5000)
+    leads = db.scalars(leads_query).all()
     for lead in leads:
         email_match = bool(email and lead.normalized_email and email == lead.normalized_email.casefold())
         phone_match = bool(phone and lead.normalized_phone and phone == re.sub(r"\D", "", lead.normalized_phone))

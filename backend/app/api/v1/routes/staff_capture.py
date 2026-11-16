@@ -1,17 +1,21 @@
 import re
 import uuid
+from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.security import require_roles
-from app.db.models import AuditLog, BusinessCard, Event, EventRegistrant, EventSession, EventStaff, Interaction, Lead, StaffCardCapture, User, now_utc
+from app.db.models import AuditLog, BusinessCard, Event, EventRegistrant, EventSession, EventStaff, IntegrationJob, Interaction, Lead, StaffCardCapture, User, now_utc
 from app.db.session import get_db
 from app.services.leads.service import _lead_code, normalize_phone
 from app.services.ocr.preprocess import InvalidImage, decode_and_prepare, detect_image_mime
@@ -24,6 +28,7 @@ router = APIRouter(prefix="/admin", tags=["staff card capture"])
 ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 STAFF_ROLES = ("ADMIN", "MANAGER", "SALES")
 EDITABLE_FIELDS = {"full_name", "company", "job_title", "email", "phone", "website", "address"}
+CAPTURE_STATUSES = {"pending_review", "pending_match", "linked", "ocr_failed", "template_detected"}
 
 
 class CaptureFields(BaseModel):
@@ -43,6 +48,16 @@ class CaptureReviewInput(BaseModel):
     registrant_id: uuid.UUID | None = None
     details_verified: bool = False
     create_new_confirmed: bool = False
+
+
+class ManualCaptureInput(BaseModel):
+    fields: CaptureFields
+    event_id: uuid.UUID
+    session_id: uuid.UUID | None = None
+    notes: str | None = Field(default=None, max_length=10000)
+    lead_id: uuid.UUID | None = None
+    registrant_id: uuid.UUID | None = None
+    confirm_distinct: bool = False
 
 
 def _event_for_capture(db: Session, event_id: uuid.UUID | None) -> Event | None:
@@ -139,6 +154,75 @@ def _make_lead(db: Session, event: Event | None, fields: dict[str, str | None]) 
     return lead
 
 
+def _manual_capture_candidates(db: Session, event_id: uuid.UUID, fields: dict[str, str | None]) -> list[dict]:
+    """Include event matches plus exact contact matches from earlier events."""
+    candidates = find_attendee_candidates(db, event_id, fields)
+    seen = {(item["kind"], item["id"]) for item in candidates}
+    email = _normal_email(fields.get("email"))
+    phone = None
+    if fields.get("phone"):
+        phone, _ = normalize_phone(fields["phone"])
+    clauses = []
+    if email:
+        clauses.append(Lead.normalized_email == email)
+    if phone:
+        clauses.append(Lead.normalized_phone == phone)
+    if clauses:
+        for lead in db.scalars(select(Lead).where(or_(*clauses)).order_by(Lead.created_at.desc()).limit(20)).all():
+            key = ("lead", str(lead.id))
+            if key in seen:
+                continue
+            matched_by = "email" if email and lead.normalized_email == email else "phone"
+            candidates.append({
+                "kind": "lead", "id": str(lead.id), "full_name": lead.full_name,
+                "company": lead.company, "email": lead.email, "phone": lead.phone,
+                "score": 1.0, "confidence": "high", "matched_by": matched_by,
+            })
+            seen.add(key)
+    candidates.sort(key=lambda item: (item["score"], item["kind"] == "lead"), reverse=True)
+    return candidates[:8]
+
+
+def _check_manual_contact_conflicts(db: Session, fields: dict[str, str | None], selected_lead_id: uuid.UUID | None) -> None:
+    email = _normal_email(fields.get("email"))
+    phone = None
+    if fields.get("phone"):
+        phone, _ = normalize_phone(fields["phone"])
+    clauses = []
+    if email:
+        clauses.append(Lead.normalized_email == email)
+    if phone:
+        clauses.append(Lead.normalized_phone == phone)
+    if not clauses:
+        return
+    conflicts = db.scalars(select(Lead).where(or_(*clauses))).all()
+    conflicting = [lead for lead in conflicts if lead.id != selected_lead_id]
+    if conflicting:
+        raise HTTPException(status_code=409, detail={
+            "message": "The entered email or phone belongs to another lead. Review the matching records before saving.",
+            "candidates": [{
+                "kind": "lead", "id": str(lead.id), "full_name": lead.full_name,
+                "company": lead.company, "email": lead.email, "phone": lead.phone,
+                "score": 1.0, "confidence": "high", "matched_by": "email_or_phone",
+            } for lead in conflicting],
+        })
+
+
+def _fill_missing_lead_fields(lead: Lead, fields: dict[str, str | None]) -> None:
+    for key in EDITABLE_FIELDS:
+        value = fields.get(key)
+        if not value or getattr(lead, key):
+            continue
+        if key == "email":
+            lead.email = value
+            lead.normalized_email = _normal_email(value)
+        elif key == "phone":
+            phone, country = normalize_phone(value)
+            lead.phone, lead.normalized_phone, lead.country = phone, phone, country
+        else:
+            setattr(lead, key, value)
+
+
 def _capture_json(capture: StaffCardCapture, db: Session) -> dict:
     event = db.get(Event, capture.event_id) if capture.event_id else None
     staff = db.get(User, capture.captured_by_user_id) if capture.captured_by_user_id else None
@@ -180,6 +264,138 @@ def card_capture_policy(user: User = Depends(require_roles(*STAFF_ROLES))):
         "external_ai_requires_consent": settings.ocr_provider.lower() in {"openrouter", "vertex"},
         "staff_card_processing_rules_approved": settings.staff_card_processing_rules_approved,
         "external_ai_consent_notice_version": settings.staff_card_external_ai_consent_notice_version,
+    }
+
+
+@router.post("/manual-captures", status_code=201)
+def create_manual_capture(
+    payload: ManualCaptureInput,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*STAFF_ROLES)),
+):
+    event = _event_for_capture(db, payload.event_id)
+    if event is None or not event.is_active:
+        raise HTTPException(status_code=422, detail="Choose an active event for this visitor capture.")
+    if user.role == "SALES" and not db.scalar(select(EventStaff.id).where(
+        EventStaff.event_id == event.id, EventStaff.user_id == user.id,
+    )):
+        raise HTTPException(status_code=403, detail="You are not assigned to capture leads for this event.")
+    session = db.get(EventSession, payload.session_id) if payload.session_id else None
+    if payload.session_id and (session is None or session.event_id != event.id or not session.is_active):
+        raise HTTPException(status_code=422, detail="Choose an active session belonging to the selected event.")
+    if payload.lead_id and payload.registrant_id:
+        raise HTTPException(status_code=422, detail="Choose one existing record to link this capture.")
+    if payload.confirm_distinct and (payload.lead_id or payload.registrant_id):
+        raise HTTPException(status_code=422, detail="Select an existing record or confirm a distinct visitor, not both.")
+
+    fields = _safe_card_fields(payload.fields.model_dump())
+    fields["email"] = _field_value(payload.fields.email)
+    fields["phone"] = _field_value(payload.fields.phone)
+    fields["website"] = _field_value(payload.fields.website)
+    if not any(fields.get(key) for key in ("full_name", "email", "phone")):
+        raise HTTPException(status_code=422, detail="Enter at least a name, email, or phone number.")
+    if fields.get("email") and not _normal_email(fields["email"]):
+        raise HTTPException(status_code=422, detail="Enter a valid email address or leave it blank.")
+    if fields.get("phone"):
+        try:
+            normalize_phone(fields["phone"])
+        except HTTPException:
+            raise HTTPException(status_code=422, detail="Enter a valid phone number or leave it blank.") from None
+
+    candidates = _manual_capture_candidates(db, event.id, fields)
+    candidate_map = {(item["kind"], item["id"]): item for item in candidates}
+    chosen_lead: Lead | None = None
+    chosen_registrant: EventRegistrant | None = None
+    if payload.lead_id:
+        key = ("lead", str(payload.lead_id))
+        if key not in candidate_map:
+            raise HTTPException(status_code=422, detail="Choose a lead from the suggested matching records.")
+        chosen_lead = db.get(Lead, payload.lead_id)
+    elif payload.registrant_id:
+        key = ("registrant", str(payload.registrant_id))
+        if key not in candidate_map:
+            raise HTTPException(status_code=422, detail="Choose a research attendee from the suggested matching records.")
+        chosen_registrant = db.scalar(select(EventRegistrant).where(
+            EventRegistrant.id == payload.registrant_id, EventRegistrant.event_id == event.id,
+        ))
+    elif not payload.confirm_distinct and candidates:
+        high = [item for item in candidates if item["confidence"] == "high"]
+        if len(high) == 1:
+            candidate = high[0]
+            if candidate["kind"] == "lead":
+                chosen_lead = db.get(Lead, uuid.UUID(candidate["id"]))
+            else:
+                chosen_registrant = db.get(EventRegistrant, uuid.UUID(candidate["id"]))
+        else:
+            raise HTTPException(status_code=409, detail={
+                "message": "Possible matches need review. Link one record, or confirm this is a different visitor.",
+                "candidates": candidates,
+            })
+
+    if chosen_registrant:
+        matched_ids = {row.matched_lead_id for row in registrant_identity_rows(db, event.id, chosen_registrant) if row.matched_lead_id}
+        if len(matched_ids) > 1:
+            raise HTTPException(status_code=409, detail="This research identity is linked to multiple leads and needs administrator reconciliation.")
+        if matched_ids:
+            matched_lead = db.get(Lead, next(iter(matched_ids)))
+            if chosen_lead and chosen_lead.id != matched_lead.id:
+                raise HTTPException(status_code=409, detail="The selected research identity is already linked to a different lead.")
+            chosen_lead = matched_lead
+
+    if chosen_lead is None and candidates and not chosen_registrant and not payload.confirm_distinct:
+        # A single high-confidence research candidate is safe to resolve to its
+        # linked lead; an unmatched research identity is handled below.
+        high = [item for item in candidates if item["confidence"] == "high"]
+        if len(high) == 1 and high[0]["kind"] == "registrant":
+            chosen_registrant = db.get(EventRegistrant, uuid.UUID(high[0]["id"]))
+
+    _check_manual_contact_conflicts(db, fields, chosen_lead.id if chosen_lead else None)
+    if payload.confirm_distinct and candidates and any(item["matched_by"] in {"email", "phone", "email_or_phone"} for item in candidates):
+        raise HTTPException(status_code=409, detail={
+            "message": "An exact email or phone match already exists. Link the existing lead to avoid a duplicate.",
+            "candidates": candidates,
+        })
+
+    created_lead = chosen_lead is None
+    lead = chosen_lead or _make_lead(db, event, fields)
+    if chosen_lead:
+        _fill_missing_lead_fields(lead, fields)
+    if chosen_registrant:
+        mark_registrant_identity_matched(db, chosen_registrant, lead.id)
+
+    interaction = Interaction(
+        lead_id=lead.id, event_id=event.id, session_id=session.id if session else None,
+        captured_by_user_id=user.id, interest=[], intent="Unspecified",
+        requirement_message=_field_value(payload.notes), data_processing_consent_at=None,
+        follow_up_consent_at=None, consent_notice_version=None,
+        ai_processing_consent_at=None, ai_processing_consent_notice_version=None,
+        capture_method="manual", source="staff_quick_capture", captured_by=user.full_name,
+        status="pending_review", synthetic_test=False, exclude_from_analytics=False,
+    )
+    db.add(interaction)
+    db.flush()
+    db.add(AuditLog(
+        user_id=user.id, action="staff_manual_capture_created", entity_type="interaction",
+        entity_id=str(interaction.id), metadata_json={
+            "event_id": str(event.id), "session_id": str(session.id) if session else None,
+            "lead_id": str(lead.id), "created_lead": created_lead,
+            "research_registrant_id": str(chosen_registrant.id) if chosen_registrant else None,
+        },
+    ))
+    if settings.google_sheet_id:
+        db.add(IntegrationJob(type="google_sheets_upsert", entity_id=interaction.id, status="pending"))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="The contact changed while this capture was being saved. Review possible matches and try again.") from None
+    return {
+        "lead_id": str(lead.id), "lead_code": lead.lead_code, "lead_name": lead.full_name,
+        "interaction_id": str(interaction.id), "event_id": str(event.id),
+        "event_name": event.name, "session_id": str(session.id) if session else None,
+        "status": interaction.status, "created_lead": created_lead,
+        "matched_research": chosen_registrant is not None,
+        "captured_by": user.full_name, "captured_at": interaction.created_at.isoformat(),
     }
 
 
@@ -305,6 +521,7 @@ async def create_card_capture(
 @router.get("/card-captures")
 def search_card_captures(
     search: str | None = None, event_id: uuid.UUID | None = None, status: str | None = None,
+    created_after: datetime | None = None,
     include_synthetic: bool = False, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db), user: User = Depends(require_roles(*STAFF_ROLES)),
 ):
@@ -315,8 +532,13 @@ def search_card_captures(
         )))
     if event_id:
         query = query.where(StaffCardCapture.event_id == event_id)
+    if created_after:
+        query = query.where(StaffCardCapture.created_at >= created_after)
     if status:
-        query = query.where(StaffCardCapture.status == status)
+        statuses = list(dict.fromkeys(value.strip() for value in status.split(",") if value.strip()))
+        if not statuses or any(value not in CAPTURE_STATUSES for value in statuses):
+            raise HTTPException(status_code=422, detail="Choose one or more supported card-capture statuses.")
+        query = query.where(StaffCardCapture.status.in_(statuses))
     if not include_synthetic:
         query = query.where(StaffCardCapture.synthetic_test.is_(False))
     if search:
@@ -349,6 +571,29 @@ def get_card_capture_image(capture_id: uuid.UUID, db: Session = Depends(get_db),
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="The private card image is unavailable.") from None
     return Response(content, media_type=capture.mime_type, headers={
+        "Content-Disposition": "inline", "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store",
+    })
+
+
+@router.get("/card-captures/{capture_id}/thumbnail")
+def get_card_capture_thumbnail(capture_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_roles(*STAFF_ROLES))):
+    capture = db.get(StaffCardCapture, capture_id)
+    if capture is None:
+        raise HTTPException(status_code=404, detail="Card capture not found.")
+    _authorize_capture_review(capture, db, user)
+    try:
+        content = storage.read(capture.storage_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="The private card image is unavailable.") from None
+    try:
+        with Image.open(BytesIO(content)) as source:
+            thumbnail = source.convert("RGB")
+            thumbnail.thumbnail((360, 240))
+            output = BytesIO()
+            thumbnail.save(output, format="JPEG", quality=75, optimize=True)
+    except Exception:
+        raise HTTPException(status_code=404, detail="A preview for this card image is unavailable.") from None
+    return Response(output.getvalue(), media_type="image/jpeg", headers={
         "Content-Disposition": "inline", "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store",
     })
 

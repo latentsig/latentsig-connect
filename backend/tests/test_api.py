@@ -1,8 +1,11 @@
 import io
+import csv
+import hashlib
 import os
 import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import closing
 from unittest.mock import patch
@@ -17,7 +20,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.db.models import BusinessCard, Event, EventRegistrant, EventSession, IntegrationJob, Interaction, Lead, Meeting, StaffCardCapture, User
+from app.db.models import (
+    BusinessCard, Event, EventEncounter, EventRegistrant, EventSession, IntegrationJob, Interaction, Lead,
+    Meeting, ResearchImportBatch, ResearchImportRow, StaffCardCapture, User,
+)
 from app.db.session import get_db
 from app.core.config import Settings, settings
 from app.core import rate_limit as rate_limit_module
@@ -352,6 +358,14 @@ class LeadApiTests(unittest.TestCase):
             self.assertEqual(first_preview.json()["row_count"], 7)
             self.assertEqual(first_preview.json()["error_count"], 5)
             self.assertEqual(first_preview.json()["sheet_names"], ["Strong Shortlist", "CSE Research"])
+            self.assertEqual(first_preview.json()["file_sha256"], hashlib.sha256(file_bytes).hexdigest())
+            self.assertEqual(first_preview.json()["quality"], {
+                "unique_profile_ids_in_registrants": 0,
+                "repeated_profile_ids_across_sheets": 1,
+                "missing_profile_id_rows": 2,
+                "warning_count": 5,
+            })
+            self.assertFalse(first_preview.json()["rollback_available"])
             first_id = first_preview.json()["id"]
             imported = self.client.post(f"/api/v1/admin/research/imports/{first_id}/confirm")
             self.assertEqual(imported.status_code, 200, imported.text)
@@ -366,6 +380,13 @@ class LeadApiTests(unittest.TestCase):
             second_id = second_preview.json()["id"]
             second_import = self.client.post(f"/api/v1/admin/research/imports/{second_id}/confirm")
             self.assertEqual(second_import.status_code, 200, second_import.text)
+            history = self.client.get(f"/api/v1/admin/events/{event_id}/research/imports")
+            self.assertEqual(history.status_code, 200, history.text)
+            second_history_item = next(item for item in history.json() if item["id"] == second_id)
+            self.assertTrue(second_history_item["rollback_available"])
+            self.assertEqual(second_history_item["file_sha256"], hashlib.sha256(file_bytes).hexdigest())
+            self.assertEqual(second_history_item["quality"]["repeated_profile_ids_across_sheets"], 1)
+            self.assertEqual(second_history_item["quality"]["missing_profile_id_rows"], 2)
             rows = self.client.get(f"/api/v1/admin/events/{event_id}/research/registrants", params={"search": "cse-row"})
             self.assertEqual(rows.status_code, 200, rows.text)
             self.assertEqual(rows.json()["total"], 1)
@@ -376,6 +397,109 @@ class LeadApiTests(unittest.TestCase):
 
         with self.TestSession() as db:
             self.assertEqual(db.scalar(select(func.count()).select_from(EventRegistrant)), 0)
+
+    def test_reordered_workbook_keeps_stable_rows_and_manual_encounters(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        from openpyxl import Workbook
+
+        def make_workbook(rows):
+            source = Workbook()
+            sheet = source.active
+            sheet.title = "Registrants"
+            sheet.append(["Profile ID", "Name", "Company", "Research Note"])
+            for row in rows:
+                sheet.append(row)
+            payload = io.BytesIO()
+            source.save(payload)
+            source.close()
+            return payload.getvalue()
+
+        first_bytes = make_workbook([
+            ["P-001", "Jordan Sample", "Alpha Systems", "Discuss vision workflow"],
+            ["P-002", "Casey Sample", "Beta Systems", "Review integration plan"],
+            [None, "Unidentified Visitor", "Unknown Systems", "Needs identity review"],
+            [None, "Unidentified Visitor", "Unknown Systems", "Needs identity review"],
+        ])
+        reordered_bytes = make_workbook([
+            ["P-002", "Casey Sample", "Beta Systems", "Review integration plan"],
+            [None, "Unidentified Visitor", "Unknown Systems", "Needs identity review"],
+            ["P-001", "Jordan Sample", "Updated Alpha Systems", "Discuss vision workflow"],
+            [None, "Unidentified Visitor", "Unknown Systems", "Needs identity review"],
+        ])
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            event_id = str(event.id)
+
+        with patch.object(research_routes.storage, "save_private", return_value=("reordered-workbook.xlsx", len(first_bytes))):
+            first_preview = self.client.post(
+                f"/api/v1/admin/events/{event_id}/research/imports",
+                files={"file": ("research.xlsx", first_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            )
+            self.assertEqual(first_preview.status_code, 201, first_preview.text)
+            self.assertEqual(first_preview.json()["quality"], {
+                "unique_profile_ids_in_registrants": 2,
+                "repeated_profile_ids_across_sheets": 0,
+                "missing_profile_id_rows": 2,
+                "warning_count": 0,
+            })
+            first_import = self.client.post(f"/api/v1/admin/research/imports/{first_preview.json()['id']}/confirm")
+            self.assertEqual(first_import.status_code, 200, first_import.text)
+
+            with self.TestSession() as db:
+                registrants = db.scalars(select(EventRegistrant).where(EventRegistrant.event_id == uuid.UUID(event_id))).all()
+                by_profile = {row.profile_id: row for row in registrants if row.profile_id}
+                first_ids = {profile_id: row.id for profile_id, row in by_profile.items()}
+                anonymous_ids = {row.id for row in registrants if not row.profile_id}
+                self.assertEqual(len(anonymous_ids), 2)
+                jordan = by_profile["P-001"]
+                # Simulate a row written by the legacy row-number key scheme.
+                jordan.source_key = "profile:p-001:sheet:registrants:row:2"
+                encounter = EventEncounter(
+                    event_id=uuid.UUID(event_id), registrant_id=jordan.id,
+                    identity_key="profile:p-001", encounter_type="meeting", status="confirmed",
+                    notes="Staff-entered notes must survive reimport and rollback.",
+                )
+                db.add(encounter)
+                db.commit()
+                encounter_id = encounter.id
+
+            second_preview = self.client.post(
+                f"/api/v1/admin/events/{event_id}/research/imports",
+                files={"file": ("research.xlsx", reordered_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            )
+            self.assertEqual(second_preview.status_code, 201, second_preview.text)
+            second_import = self.client.post(f"/api/v1/admin/research/imports/{second_preview.json()['id']}/confirm")
+            self.assertEqual(second_import.status_code, 200, second_import.text)
+
+            with self.TestSession() as db:
+                latest = db.scalar(select(ResearchImportBatch).where(ResearchImportBatch.id == uuid.UUID(second_preview.json()["id"])))
+                latest_rows = db.scalars(select(EventRegistrant).where(
+                    EventRegistrant.event_id == uuid.UUID(event_id),
+                    EventRegistrant.last_import_batch_id == latest.id,
+                )).all()
+                by_profile = {row.profile_id: row for row in latest_rows if row.profile_id}
+                self.assertEqual({key: row.id for key, row in by_profile.items()}, first_ids)
+                self.assertEqual(by_profile["P-001"].source_row, 4)
+                self.assertEqual(by_profile["P-001"].company, "Updated Alpha Systems")
+                self.assertEqual({row.id for row in latest_rows if not row.profile_id}, anonymous_ids)
+                self.assertEqual(len(latest_rows), 4)
+                saved_encounter = db.get(EventEncounter, encounter_id)
+                self.assertEqual(saved_encounter.registrant_id, by_profile["P-001"].id)
+                self.assertEqual(saved_encounter.notes, "Staff-entered notes must survive reimport and rollback.")
+
+            rolled_back = self.client.post(f"/api/v1/admin/research/imports/{second_preview.json()['id']}/rollback")
+            self.assertEqual(rolled_back.status_code, 200, rolled_back.text)
+            with self.TestSession() as db:
+                restored = db.scalar(select(EventRegistrant).where(
+                    EventRegistrant.event_id == uuid.UUID(event_id), EventRegistrant.profile_id == "P-001",
+                ))
+                saved_encounter = db.get(EventEncounter, encounter_id)
+                self.assertEqual(restored.id, first_ids["P-001"])
+                self.assertEqual(restored.source_key, "profile:p-001:sheet:registrants:row:2")
+                self.assertEqual(restored.source_row, 2)
+                self.assertEqual(restored.company, "Alpha Systems")
+                self.assertEqual(saved_encounter.registrant_id, restored.id)
+                self.assertEqual(saved_encounter.notes, "Staff-entered notes must survive reimport and rollback.")
 
     def test_workbook_flags_incomplete_latent_sig_fit_rows(self):
         from openpyxl import Workbook
@@ -478,9 +602,17 @@ class LeadApiTests(unittest.TestCase):
         with self.TestSession() as db:
             event = db.scalar(select(Event).where(Event.slug == "test-event"))
             event_id = str(event.id)
-            db.add_all([
+            duplicate_leads = [
                 Lead(lead_code="DUPLICATE-001", full_name="Alex Example", company="Example Systems"),
                 Lead(lead_code="DUPLICATE-002", full_name="Alex Example", company="Example Systems"),
+            ]
+            db.add_all(duplicate_leads)
+            db.flush()
+            db.add_all([
+                Interaction(lead_id=lead.id, event_id=event.id, interest=[], intent="Unspecified", capture_method="manual", source="event-test")
+                for lead in duplicate_leads
+            ])
+            db.add_all([
                 EventRegistrant(event_id=event.id, profile_id="CONTACTLESS-001", source_key="profile:contactless-001:sheet:registrants:row:2", source_filename="research.xlsx", sheet_name="Registrants", source_row=2, full_name="Jordan Research", company="Research Systems", raw_data={}),
             ])
             db.commit()
@@ -585,6 +717,314 @@ class LeadApiTests(unittest.TestCase):
         self.assertEqual(dashboard.json()["activity"]["unique_submitted_contacts"], 1)
         self.assertEqual(dashboard.json()["activity"]["staff_confirmed_encounters"], 1)
 
+    def test_research_sheets_and_global_search_group_only_stable_profile_ids(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            user = db.scalar(select(User).where(User.email == "bharat@latentsig.com"))
+            event_id = event.id
+            batch = ResearchImportBatch(
+                event_id=event.id,
+                uploaded_by=user.id,
+                original_filename="bts-fixture.xlsx",
+                file_sha256="a" * 64,
+                storage_path="bts-fixture.xlsx",
+                status="imported",
+                sheet_names=["Registrants", "Strong shortlist", "CSE Research"],
+                row_count=4,
+                errors=[],
+            )
+            db.add(batch)
+            db.flush()
+            source_rows = [
+                ("PROFILE-GLOBAL-001", "Registrants", 2, "Jordan Example", "Research Systems", {}),
+                ("PROFILE-GLOBAL-001", "Strong shortlist", 7, "Jordan Example", "Research Systems", {"Must-Meet": "A"}),
+                ("PROFILE-GLOBAL-001", "CSE Research", 10, "Jordan Example", "Research Systems", {"Research Evidence": "CSE evidence phrase", "Untrusted cell": "=1+1"}),
+                ("PROFILE-GLOBAL-002", "Registrants", 3, "Jordan Example", "Research Systems", {}),
+            ]
+            for profile_id, sheet_name, source_row, full_name, company, extra_cells in source_rows:
+                cells = {"Profile ID": profile_id, "Name": full_name, "Company": company, **extra_cells}
+                source_key = f"profile:{profile_id.casefold()}:sheet:{sheet_name.casefold()}:row:{source_row}"
+                db.add(ResearchImportRow(
+                    batch_id=batch.id,
+                    sheet_name=sheet_name,
+                    source_row=source_row,
+                    source_key=source_key,
+                    profile_id=profile_id,
+                    row_data={"cells": cells},
+                    validation_errors=[],
+                ))
+                db.add(EventRegistrant(
+                    event_id=event.id,
+                    last_import_batch_id=batch.id,
+                    profile_id=profile_id,
+                    source_key=source_key,
+                    source_filename=batch.original_filename,
+                    sheet_name=sheet_name,
+                    source_row=source_row,
+                    full_name=full_name,
+                    company=company,
+                    shortlist_status=extra_cells.get("Must-Meet"),
+                    raw_data=cells,
+                ))
+            db.commit()
+
+        sheets = self.client.get(f"/api/v1/admin/events/{event_id}/research/sheets")
+        self.assertEqual(sheets.status_code, 200, sheets.text)
+        self.assertEqual(sheets.json()["row_count"], 4)
+        self.assertEqual(sheets.json()["unique_registrant_profile_ids"], 2)
+        by_sheet = {item["sheet_name"]: item for item in sheets.json()["sheets"]}
+        self.assertEqual(by_sheet["Registrants"]["row_count"], 2)
+        self.assertEqual(by_sheet["Strong shortlist"]["row_count"], 1)
+        self.assertEqual(by_sheet["CSE Research"]["row_count"], 1)
+
+        matches = self.client.get(
+            f"/api/v1/admin/events/{event_id}/research/attendees?search=CSE%20evidence%20phrase"
+        )
+        self.assertEqual(matches.status_code, 200, matches.text)
+        self.assertEqual(matches.json()["total"], 1)
+        person = matches.json()["items"][0]
+        self.assertEqual(person["membership_count"], 3)
+        self.assertEqual(set(person["sheets"]), {"Registrants", "Strong shortlist", "CSE Research"})
+
+        same_name = self.client.get(
+            f"/api/v1/admin/events/{event_id}/research/attendees?search=Jordan%20Example"
+        )
+        self.assertEqual(same_name.status_code, 200, same_name.text)
+        self.assertEqual(same_name.json()["total"], 2)
+
+        detail = self.client.get(
+            f"/api/v1/admin/events/{event_id}/research/attendees/{person['id']}"
+        )
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertEqual(len(detail.json()["memberships"]), 3)
+        self.assertIn("CSE evidence phrase", str(detail.json()["memberships"]))
+
+        exported = self.client.get(f"/api/v1/admin/events/{event_id}/research/export?sheet=CSE%20Research")
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertIn("attachment; filename=", exported.headers["content-disposition"])
+        export_rows = list(csv.DictReader(io.StringIO(exported.content.decode("utf-8-sig"))))
+        self.assertEqual(len(export_rows), 1)
+        self.assertEqual(export_rows[0]["Untrusted cell"], "'=1+1")
+
+    def test_unmatched_visitor_metric_excludes_unmatched_imported_research_rows(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            event_id = str(event.id)
+            db.add(EventRegistrant(
+                event_id=event.id,
+                profile_id="UNMET-RESEARCH-TARGET",
+                source_key="profile:unmet-research-target:sheet:registrants:row:2",
+                source_filename="research.xlsx",
+                sheet_name="Registrants",
+                source_row=2,
+                full_name="Unmet Research Target",
+                company="Research Example Ltd",
+                raw_data={},
+            ))
+            db.commit()
+
+        dashboard = self.client.get(f"/api/v1/admin/events/{event_id}/dashboard")
+        self.assertEqual(dashboard.status_code, 200, dashboard.text)
+        self.assertEqual(dashboard.json()["research"]["unmatched_registrants"], 1)
+        self.assertEqual(dashboard.json()["activity"]["unmatched_visitors"], 0)
+
+        submission = self.submit(
+            full_name="Actual Booth Visitor",
+            company="Booth Example Ltd",
+            email="actual-booth-visitor@example.com",
+            phone="+14155552679",
+            event_slug="test-event",
+        )
+        self.assertEqual(submission.status_code, 201, submission.text)
+        dashboard = self.client.get(f"/api/v1/admin/events/{event_id}/dashboard")
+        self.assertEqual(dashboard.status_code, 200, dashboard.text)
+        self.assertEqual(dashboard.json()["activity"]["unmatched_visitors"], 1)
+        self.assertEqual(dashboard.json()["activity"]["unmatched_submissions"], 1)
+
+    def test_research_matching_is_scoped_to_the_selected_event(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            other_event = Event(name="Other Event", slug="other-event", is_active=True)
+            db.add(other_event)
+            db.flush()
+            registrant = EventRegistrant(
+                event_id=other_event.id,
+                profile_id="OTHER-EVENT-PROFILE",
+                source_key="profile:other-event-profile:sheet:registrants:row:2",
+                source_filename="other-event.xlsx",
+                sheet_name="Registrants",
+                source_row=2,
+                full_name="Cross Event Contact",
+                company="Shared Systems",
+                raw_data={"Profile ID": "OTHER-EVENT-PROFILE"},
+            )
+            db.add(registrant)
+            db.commit()
+            event_id = str(other_event.id)
+            registrant_id = str(registrant.id)
+
+        submission = self.submit(
+            full_name="Cross Event Contact",
+            company="Shared Systems",
+            email="cross-event-contact@example.com",
+            phone="+14155552677",
+            event_slug="test-event",
+        )
+        self.assertEqual(submission.status_code, 201, submission.text)
+        lead_id = submission.json()["id"]
+        suggestions = self.client.get(
+            f"/api/v1/admin/events/{event_id}/research/registrants/{registrant_id}/matches"
+        )
+        self.assertEqual(suggestions.status_code, 200, suggestions.text)
+        self.assertNotIn(lead_id, {item["id"] for item in suggestions.json() if item["kind"] == "lead"})
+        linked = self.client.post(
+            f"/api/v1/admin/events/{event_id}/research/registrants/{registrant_id}/match",
+            json={"lead_id": lead_id},
+        )
+        self.assertEqual(linked.status_code, 422, linked.text)
+
+    def test_research_attendee_encounters_do_not_create_leads_and_link_later(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            event_id = str(event.id)
+            registrants = []
+            for sheet_name, source_row in (("Registrants", 2), ("Strong shortlist", 4)):
+                registrant = EventRegistrant(
+                    event_id=event.id,
+                    profile_id="PROFILE-ENCOUNTER-001",
+                    source_key=f"profile:profile-encounter-001:sheet:{sheet_name.casefold()}:row:{source_row}",
+                    source_filename="research.xlsx",
+                    sheet_name=sheet_name,
+                    source_row=source_row,
+                    full_name="Casey Research",
+                    company="Research Systems",
+                    raw_data={"Profile ID": "PROFILE-ENCOUNTER-001", "Name": "Casey Research"},
+                )
+                db.add(registrant)
+                registrants.append(registrant)
+            db.commit()
+            ids = [str(row.id) for row in registrants]
+
+        met = self.client.post(
+            f"/api/v1/admin/events/{event_id}/encounters",
+            json={"registrant_id": ids[0], "encounter_type": "met", "notes": "Discussed research goals."},
+        )
+        self.assertEqual(met.status_code, 201, met.text)
+        self.assertIsNone(met.json()["lead_id"])
+        self.assertEqual(met.json()["profile_id"], "PROFILE-ENCOUNTER-001")
+        self.assertEqual(met.json()["status"], "completed")
+
+        demo = self.client.post(
+            f"/api/v1/admin/events/{event_id}/encounters",
+            json={"registrant_id": ids[1], "encounter_type": "demo", "topics": ["Agentic AI"]},
+        )
+        self.assertEqual(demo.status_code, 201, demo.text)
+        self.assertTrue(demo.json()["demo_presented"])
+
+        meeting = self.client.post(
+            f"/api/v1/admin/events/{event_id}/encounters",
+            json={"registrant_id": ids[0], "encounter_type": "meeting", "status": "confirmed", "next_steps": "Send the demo notes.", "follow_up_due_at": "2030-01-01T00:00:00Z"},
+        )
+        self.assertEqual(meeting.status_code, 201, meeting.text)
+        self.assertEqual(meeting.json()["status"], "confirmed")
+        unified_meetings = self.client.get(f"/api/v1/admin/events/{event_id}/meetings")
+        self.assertEqual(unified_meetings.status_code, 200, unified_meetings.text)
+        self.assertEqual(len(unified_meetings.json()), 1)
+        self.assertEqual(unified_meetings.json()[0]["kind"], "research_meeting")
+        self.assertEqual(unified_meetings.json()[0]["registrant_id"], ids[0])
+
+        from_other_membership = self.client.get(
+            f"/api/v1/admin/events/{event_id}/research/attendees/{ids[1]}/encounters"
+        )
+        self.assertEqual(from_other_membership.status_code, 200, from_other_membership.text)
+        self.assertEqual(len(from_other_membership.json()), 3)
+        self.assertEqual({row["lead_id"] for row in from_other_membership.json()}, {None})
+        dashboard = self.client.get(f"/api/v1/admin/events/{event_id}/dashboard")
+        self.assertEqual(dashboard.status_code, 200, dashboard.text)
+        self.assertEqual(dashboard.json()["activity"]["staff_confirmed_encounters"], 2)
+        self.assertEqual(dashboard.json()["activity"]["unique_people_met"], 1)
+        self.assertEqual(dashboard.json()["activity"]["confirmed_meetings"], 1)
+        self.assertEqual(dashboard.json()["activity"]["outstanding_follow_ups"], 1)
+
+        completed = self.client.patch(
+            f"/api/v1/admin/event-encounters/{meeting.json()['id']}",
+            json={"status": "completed"},
+        )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        self.assertEqual(completed.json()["status"], "completed")
+        unified_meetings = self.client.get(f"/api/v1/admin/events/{event_id}/meetings")
+        self.assertEqual(unified_meetings.json()[0]["status"], "completed")
+        dashboard = self.client.get(f"/api/v1/admin/events/{event_id}/dashboard")
+        self.assertEqual(dashboard.json()["activity"]["confirmed_meetings"], 1)
+        self.assertEqual(dashboard.json()["activity"]["outstanding_follow_ups"], 0)
+
+        submission = self.submit(
+            full_name="Casey Research",
+            company="Research Systems",
+            email="casey-research@example.com",
+            phone="+14155552678",
+            event_slug="test-event",
+        )
+        self.assertEqual(submission.status_code, 201, submission.text)
+        lead_id = submission.json()["id"]
+        linked = self.client.post(
+            f"/api/v1/admin/events/{event_id}/research/registrants/{ids[1]}/match",
+            json={"lead_id": lead_id},
+        )
+        self.assertEqual(linked.status_code, 200, linked.text)
+        with self.TestSession() as db:
+            encounters = db.scalars(select(EventEncounter).where(EventEncounter.event_id == uuid.UUID(event_id))).all()
+            self.assertEqual({str(item.lead_id) for item in encounters}, {lead_id})
+
+    def test_event_priority_panels_use_explicit_source_priority_and_open_actions(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            rows = [
+                EventRegistrant(event_id=event.id, profile_id="TARGET-A", source_key="target-a:shortlist", source_filename="research.xlsx", sheet_name="Strong shortlist", source_row=2, full_name="A Target", company="Alpha Systems", raw_data={"Must-Meet": "A", "Relationship": "Client", "Latent Sig Fit": "Strong", "Opener": "Discuss a validated manufacturing workflow."}),
+                EventRegistrant(event_id=event.id, profile_id="TARGET-A", source_key="target-a:client", source_filename="research.xlsx", sheet_name="Clients-Strong", source_row=3, full_name="A Target", company="Alpha Systems", raw_data={"Relationship": "Client", "Latent Sig Fit": "Strong", "Suggested Angle": "Same person from another worksheet."}),
+                EventRegistrant(event_id=event.id, profile_id="TARGET-B", source_key="target-b:shortlist", source_filename="research.xlsx", sheet_name="Strong shortlist", source_row=4, full_name="B Target", company="Beta Systems", raw_data={"Must-Meet": "B", "Relationship": "Design Partner", "Latent Sig Fit": "Strong", "Opener": "Explore a small prototype."}),
+                EventRegistrant(event_id=event.id, profile_id="TARGET-MET", source_key="target-met:shortlist", source_filename="research.xlsx", sheet_name="Strong shortlist", source_row=5, full_name="Met Target", company="Gamma Systems", raw_data={"Must-Meet": "A", "Relationship": "Client", "Latent Sig Fit": "Strong"}),
+                EventRegistrant(event_id=event.id, profile_id="BAD-PRIORITY", source_key="bad-priority:shortlist", source_filename="research.xlsx", sheet_name="Strong shortlist", source_row=6, full_name="Bad Priority", company="Delta Systems", raw_data={"Must-Meet": "https://example.com", "Relationship": "Competitor", "Latent Sig Fit": "Strong"}),
+                EventRegistrant(event_id=event.id, profile_id="OPPORTUNITY", source_key="opportunity:design", source_filename="research.xlsx", sheet_name="Design Partners", source_row=7, full_name="Opportunity Target", company="Partner Systems", raw_data={"Relationship": "Design Partner", "Latent Sig Fit": "Strong", "Suggested Angle": "Research-backed partnership idea."}),
+                EventRegistrant(event_id=event.id, profile_id="RECONCILE", source_key="reconcile:row", source_filename="research.xlsx", sheet_name="Strong shortlist", source_row=8, full_name="Needs Review", company="Review Systems", raw_data={}, reconciliation_required=True, reconciliation_errors=["Missing Profile ID"]),
+            ]
+            db.add_all(rows)
+            db.flush()
+            db.add(EventEncounter(event_id=event.id, registrant_id=rows[3].id, identity_key="profile:target-met", encounter_type="met", status="completed", notes="Already met."))
+            db.add(EventEncounter(event_id=event.id, registrant_id=rows[0].id, identity_key="profile:target-a", encounter_type="meeting", status="requested", follow_up_due_at=datetime.now(timezone.utc) - timedelta(days=1), next_steps="Send the agenda."))
+            db.commit()
+            event_id = str(event.id)
+
+        response = self.client.get(f"/api/v1/admin/events/{event_id}/priority-panels")
+        self.assertEqual(response.status_code, 200, response.text)
+        panels = response.json()
+        must_meet = panels["must_meet_next"]
+        self.assertEqual(must_meet["total"], 2)
+        self.assertEqual(must_meet["priority_counts"], {"A": 1, "B": 1})
+        self.assertEqual([item["priority"] for item in must_meet["items"]], ["A", "B"])
+        self.assertEqual(must_meet["items"][0]["profile_id"], "TARGET-A")
+        self.assertEqual(must_meet["items"][0]["pitch"], "Discuss a validated manufacturing workflow.")
+        self.assertNotIn("TARGET-MET", {item["profile_id"] for item in must_meet["items"]})
+        self.assertNotIn("BAD-PRIORITY", {item["profile_id"] for item in must_meet["items"]})
+        self.assertEqual(panels["research_opportunities"]["total"], 1)
+        self.assertEqual(panels["research_opportunities"]["items"][0]["profile_id"], "OPPORTUNITY")
+        self.assertEqual(panels["follow_ups"]["total"], 1)
+        self.assertEqual(panels["follow_ups"]["items"][0]["next_steps"], "Send the agenda.")
+        self.assertEqual(panels["needs_review"]["reconciliation_rows"], 1)
+        self.assertEqual(panels["needs_review"]["reconciliation_items"][0]["sheet_name"], "Strong shortlist")
+        priority_a = self.client.get(f"/api/v1/admin/events/{event_id}/research/registrants?sheet=Strong%20shortlist&priority=A&page_size=100")
+        self.assertEqual(priority_a.status_code, 200, priority_a.text)
+        self.assertEqual(priority_a.json()["total"], 2)
+        self.assertTrue(all(row["raw_data"]["Must-Meet"] == "A" for row in priority_a.json()["items"]))
+        priority_b = self.client.get(f"/api/v1/admin/events/{event_id}/research/registrants?sheet=Strong%20shortlist&priority=B&page_size=100")
+        self.assertEqual(priority_b.status_code, 200, priority_b.text)
+        self.assertEqual(priority_b.json()["total"], 1)
+        self.assertEqual(priority_b.json()["items"][0]["raw_data"]["Must-Meet"], "B")
+
     def test_contactless_card_capture_collapses_duplicate_worksheet_candidates(self):
         self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
         with self.TestSession() as db:
@@ -677,6 +1117,7 @@ class LeadApiTests(unittest.TestCase):
                 )
                 db.add(row)
                 rows.append(row)
+            db.add(Interaction(lead_id=lead.id, event_id=event.id, interest=[], intent="Unspecified", capture_method="manual", source="event-test"))
             db.commit()
             event_id, registrant_id, lead_id = str(event_id), str(rows[0].id), str(lead.id)
 
@@ -690,6 +1131,100 @@ class LeadApiTests(unittest.TestCase):
             rows = db.scalars(select(EventRegistrant).where(EventRegistrant.profile_id == "PROFILE-MANUAL-001")).all()
             self.assertEqual({row.match_status for row in rows}, {"matched"})
             self.assertEqual({row.matched_lead_id for row in rows}, {uuid.UUID(lead_id)})
+
+    def test_staff_manual_capture_keeps_missing_fields_and_consent_blank(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            session = EventSession(event_id=event.id, name="Morning", slug="manual-morning")
+            db.add(session)
+            db.commit()
+            event_id, session_id = str(event.id), str(session.id)
+
+        response = self.client.post("/api/v1/admin/manual-captures", json={
+            "event_id": event_id, "session_id": session_id,
+            "fields": {"full_name": "Jamie Manual", "company": "Example Works"},
+            "notes": "Asked about annotation services.",
+        })
+        self.assertEqual(response.status_code, 201, response.text)
+        result = response.json()
+        self.assertEqual(result["event_name"], "Test Event")
+        self.assertEqual(result["status"], "pending_review")
+        self.assertTrue(result["created_lead"])
+        with self.TestSession() as db:
+            lead = db.get(Lead, uuid.UUID(result["lead_id"]))
+            interaction = db.get(Interaction, uuid.UUID(result["interaction_id"]))
+            self.assertEqual(lead.full_name, "Jamie Manual")
+            self.assertEqual(lead.company, "Example Works")
+            self.assertIsNone(lead.email)
+            self.assertIsNone(lead.phone)
+            self.assertEqual(interaction.event_id, uuid.UUID(event_id))
+            self.assertEqual(interaction.session_id, uuid.UUID(session_id))
+            self.assertEqual(interaction.capture_method, "manual")
+            self.assertEqual(interaction.source, "staff_quick_capture")
+            self.assertEqual(interaction.status, "pending_review")
+            self.assertEqual(interaction.requirement_message, "Asked about annotation services.")
+            self.assertIsNone(interaction.data_processing_consent_at)
+            self.assertIsNone(interaction.follow_up_consent_at)
+            self.assertIsNone(interaction.ai_processing_consent_at)
+        dashboard = self.client.get(f"/api/v1/admin/events/{event_id}/dashboard")
+        self.assertEqual(dashboard.json()["activity"]["submissions"], 1)
+        self.assertEqual(dashboard.json()["activity"]["staff_manual_captures"], 1)
+        self.assertEqual(dashboard.json()["activity"]["staff_card_captures"], 0)
+
+    def test_staff_manual_capture_requires_review_for_ambiguous_research_matches(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            db.add_all([
+                EventRegistrant(event_id=event.id, profile_id="MANUAL-A", source_key="profile:manual-a", source_filename="research.xlsx", sheet_name="Registrants", source_row=2, full_name="Alex Visitor", company="Example Labs", raw_data={}),
+                EventRegistrant(event_id=event.id, profile_id="MANUAL-B", source_key="profile:manual-b", source_filename="research.xlsx", sheet_name="Strong shortlist", source_row=3, full_name="Alex Visitor", company="Example Labs", raw_data={}),
+            ])
+            db.commit()
+            event_id = str(event.id)
+
+        payload = {"event_id": event_id, "fields": {"full_name": "Alex Visitor", "company": "Example Labs"}}
+        ambiguous = self.client.post("/api/v1/admin/manual-captures", json=payload)
+        self.assertEqual(ambiguous.status_code, 409, ambiguous.text)
+        suggestions = ambiguous.json()["detail"]["candidates"]
+        self.assertEqual(len(suggestions), 2)
+        linked = self.client.post("/api/v1/admin/manual-captures", json={**payload, "registrant_id": suggestions[0]["id"]})
+        self.assertEqual(linked.status_code, 201, linked.text)
+        self.assertTrue(linked.json()["matched_research"])
+        with self.TestSession() as db:
+            selected_profile_id = next(item["profile_id"] for item in suggestions if item["id"] == suggestions[0]["id"])
+            unselected_profile_id = next(item["profile_id"] for item in suggestions if item["id"] != suggestions[0]["id"])
+            rows = db.scalars(select(EventRegistrant).where(EventRegistrant.profile_id == selected_profile_id)).all()
+            siblings = db.scalars(select(EventRegistrant).where(EventRegistrant.profile_id == unselected_profile_id)).all()
+            self.assertEqual({row.match_status for row in rows}, {"matched"})
+            self.assertEqual({row.matched_lead_id for row in rows}, {uuid.UUID(linked.json()["lead_id"])})
+            self.assertTrue(all(row.match_status == "unmatched" for row in siblings))
+
+    def test_staff_manual_capture_links_exact_contact_from_another_event(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            previous_event = Event(name="Previous Event", slug="previous-event", is_active=True)
+            db.add(previous_event)
+            db.flush()
+            lead = Lead(lead_code="LS-PREVIOUS-000001", full_name="Morgan Existing", email="morgan@example.com", normalized_email="morgan@example.com")
+            db.add(lead)
+            db.flush()
+            db.add(Interaction(lead_id=lead.id, event_id=previous_event.id, interest=[], intent="Unspecified", capture_method="manual", source="prior-event"))
+            db.commit()
+            event_id, lead_id = str(event.id), lead.id
+
+        response = self.client.post("/api/v1/admin/manual-captures", json={
+            "event_id": event_id, "fields": {"full_name": "Morgan Existing", "email": "morgan@example.com"},
+        })
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertFalse(response.json()["created_lead"])
+        self.assertEqual(uuid.UUID(response.json()["lead_id"]), lead_id)
+        with self.TestSession() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(Lead)), 1)
+            current_event_interaction = db.get(Interaction, uuid.UUID(response.json()["interaction_id"]))
+            self.assertEqual(current_event_interaction.event_id, uuid.UUID(event_id))
+            self.assertIsNone(current_event_interaction.data_processing_consent_at)
 
     def test_staff_card_capture_saves_incomplete_lead_without_inventing_consent(self):
         self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
@@ -866,6 +1401,55 @@ class LeadApiTests(unittest.TestCase):
             removed = self.client.delete(f"/api/v1/admin/card-captures/{synthetic.json()['id']}")
         self.assertEqual(removed.status_code, 204)
         delete_storage.assert_called_once()
+
+    def test_card_capture_inbox_filters_groups_dates_and_protects_thumbnails(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            now = datetime.now(timezone.utc)
+            captures = []
+            for status in ("pending_review", "template_detected", "pending_match", "linked", "ocr_failed"):
+                capture = StaffCardCapture(
+                    event_id=event.id, original_filename=f"{status}.jpg", mime_type="image/jpeg", file_size=12,
+                    storage_path=f"private/{status}.jpg", ocr_json={"full_name": "Inbox Person"}, status=status,
+                    synthetic_test=status == "ocr_failed", exclude_from_analytics=status == "ocr_failed",
+                    created_at=now,
+                )
+                db.add(capture)
+                captures.append(capture)
+            db.commit()
+            event_id = str(event.id)
+            capture_id = str(captures[0].id)
+
+        grouped = self.client.get(
+            f"/api/v1/admin/card-captures?event_id={event_id}&status=pending_review%2Ctemplate_detected"
+        )
+        self.assertEqual(grouped.status_code, 200, grouped.text)
+        self.assertEqual(grouped.json()["total"], 2)
+        self.assertEqual({item["status"] for item in grouped.json()["items"]}, {"pending_review", "template_detected"})
+        recent = self.client.get("/api/v1/admin/card-captures?created_after=2099-01-01T00%3A00%3A00Z")
+        self.assertEqual(recent.status_code, 200, recent.text)
+        self.assertEqual(recent.json()["total"], 0)
+        invalid = self.client.get("/api/v1/admin/card-captures?status=unknown")
+        self.assertEqual(invalid.status_code, 422)
+
+        original = io.BytesIO()
+        Image.new("RGB", (1200, 800), "white").save(original, format="JPEG")
+        with patch.object(staff_capture_routes.storage, "read", return_value=original.getvalue()):
+            thumbnail = self.client.get(f"/api/v1/admin/card-captures/{capture_id}/thumbnail")
+        self.assertEqual(thumbnail.status_code, 200, thumbnail.text)
+        self.assertEqual(thumbnail.headers["content-type"], "image/jpeg")
+        self.assertEqual(thumbnail.headers["cache-control"], "private, no-store")
+        with Image.open(io.BytesIO(thumbnail.content)) as preview:
+            self.assertEqual(preview.format, "JPEG")
+            self.assertLessEqual(preview.width, 360)
+            self.assertLessEqual(preview.height, 240)
+
+        self.assertEqual(self.sign_in("bhoomika@latentsig.com").status_code, 200)
+        with patch.object(staff_capture_routes.storage, "read") as unauthorized_read:
+            unauthorized = self.client.get(f"/api/v1/admin/card-captures/{capture_id}/thumbnail")
+        self.assertEqual(unauthorized.status_code, 404)
+        unauthorized_read.assert_not_called()
 
     def test_approved_synthetic_card_uses_external_ocr_without_fabricating_consent(self):
         self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
