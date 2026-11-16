@@ -18,6 +18,10 @@ _TEMPLATE = re.compile(
     r'000[.\s-]*123[.\s-]*45678|username|urname@email\.com|yourname@|'
     r'(?<![\w@.])email\.com)\b', re.I,
 )
+_PLACEHOLDER_CONTACT_MARKERS = (
+    'www.website.com', 'websitename.com', 'youremail@website.com', 'yourname@website.com',
+    'street name city name', 'street address here',
+)
 _LABEL = re.compile(r'^(full name|name|company|organization|job title|title|position|role|address)\s*:\s*(.+)$', re.I)
 _LABEL_FIELDS = {'full name': 'full_name', 'name': 'full_name', 'company': 'company', 'organization': 'company',
                  'job title': 'job_title', 'title': 'job_title', 'position': 'job_title', 'role': 'job_title', 'address': 'address'}
@@ -49,12 +53,20 @@ def prepare_image(images: list[tuple[bytes, str]]) -> bytes:
     return output.getvalue()
 
 
+def has_placeholder_contact_markers(text: str) -> bool:
+    normalized = re.sub(r'\s+', ' ', text.casefold())
+    if any(marker in normalized for marker in _PLACEHOLDER_CONTACT_MARKERS):
+        return True
+    digits = re.sub(r'\D', '', normalized)
+    return '00012345678' in digits
+
+
 def parse_transcription(text: str) -> CardExtraction:
     if not isinstance(text, str) or not text.strip() or len(text) > 12000:
         raise ValueError('Invalid OCR transcription length.')
     if any(unicodedata.category(character) in {'Cc', 'Cs'} and character not in '\n\r\t' for character in text):
         raise ValueError('Unsupported OCR transcription characters.')
-    if _TEMPLATE.search(text):
+    if _TEMPLATE.search(text) or has_placeholder_contact_markers(text):
         return CardExtraction(is_template=True, warnings=[TEMPLATE_WARNING])
     rows = [row.strip().strip('#* ').strip() for row in text.splitlines() if row.strip()]
     parsed = parse_card([{'text': row, 'confidence': 0.5} for row in rows], settings.default_phone_region)

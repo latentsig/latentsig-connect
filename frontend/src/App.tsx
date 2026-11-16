@@ -77,10 +77,10 @@ function PageFrame({ children, compact = false }: { children: React.ReactNode, c
 function Home() {
   const [params] = useSearchParams()
   const preserve = params.toString()
-  return <PageFrame><section className="hero"><div className="eyebrow"><span className="live-dot" /> LATENTSIG CONNECT</div><h1>Let’s stay<br className="mobile-break" /> connected<span className="period">.</span></h1><p className="hero-copy">Tell us what you’re interested in, and we’ll connect you with the right person.</p>
+  return <PageFrame><section className="hero"><div className="eyebrow"><span className="live-dot" /> LATENTSIG CONNECT</div><h1>Let’s stay<br className="mobile-break" /> connected<span className="period">.</span></h1><p className="hero-copy">Choose one: scan your business card and review the details, or enter them yourself.</p>
     <div className="choice-grid">
-      <Link to={`/connect/card${preserve ? `?${preserve}` : ''}`} className="choice-card card-choice"><span className="choice-icon scan-icon"><ScanLine size={23} /></span><span className="choice-text"><strong>Scan / Upload Business Card</strong><small>Fastest option</small></span><ArrowUpRight className="choice-arrow" size={19} /></Link>
-      <Link to={`/connect/manual${preserve ? `?${preserve}` : ''}`} className="choice-card"><span className="choice-icon manual-icon"><UserRound size={23} /></span><span className="choice-text"><strong>Enter Details Manually</strong><small>Takes less than a minute</small></span><ArrowUpRight className="choice-arrow" size={19} /></Link>
+      <Link to={`/connect/card${preserve ? `?${preserve}` : ''}`} className="choice-card card-choice"><span className="choice-icon scan-icon"><ScanLine size={23} /></span><span className="choice-text"><strong>Scan / Upload Business Card</strong><small>Review and edit before sharing</small></span><ArrowUpRight className="choice-arrow" size={19} /></Link>
+      <Link to={`/connect/manual${preserve ? `?${preserve}` : ''}`} className="choice-card"><span className="choice-icon manual-icon"><UserRound size={23} /></span><span className="choice-text"><strong>Enter Details Manually</strong><small>No card scan needed</small></span><ArrowUpRight className="choice-arrow" size={19} /></Link>
     </div>
     <div className="privacy-note"><LockKeyhole size={15} /><span>Your details are securely processed for this connection and shared with the LatentSig team.</span></div>
   </section></PageFrame>

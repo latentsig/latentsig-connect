@@ -10,7 +10,7 @@ const configuredApiBase = import.meta.env.VITE_API_BASE_URL || ''
 const apiBase = configuredApiBase === '__LATENTSIG_LOCAL_API__'
   ? `${window.location.protocol}//${window.location.hostname}:8000`
   : configuredApiBase
-type User = { id: string; email: string; full_name: string; role: string }
+type User = { id: string; email: string; full_name: string; role: string; is_active?: boolean }
 type Row = { id: string; lead_code: string; full_name: string; company: string; job_title: string; email: string; email_type: string; phone: string; website?: string; interaction: { id: string; event?: string; interest: string[]; intent: string; status: string; assigned_to?: string; assigned_name?: string; capture_method: string; captured_by?: string; source?: string; business_card?: { has_back: boolean } | null; created_at: string } }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -278,7 +278,7 @@ function LeadDetail() {
           {item.capture_method === 'business_card' && item.business_card && <div className="history-card-images"><span className="history-card-label">Card uploaded for this business card submission</span><div className="history-card-thumbnails"><CardImageButton leadId={id!} interactionId={item.id} side="front" label="View front" className="history-card-view"/>{item.business_card.has_back && <CardImageButton leadId={id!} interactionId={item.id} side="back" label="View back" className="history-card-view"/>}</div></div>}
         </article>)}
       </section>}
-      {actor.data?.role !== 'VIEWER' && salesCanAct && <LeadMeetingPanel leadId={id!} interactionId={latest.id}/>}
+      {actor.data?.role !== 'VIEWER' && salesCanAct && <LeadMeetingPanel leadId={id!} interactionId={latest.id} currentUser={actor.data} team={team.data || []}/>}
     </div>
   </>
 }

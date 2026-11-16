@@ -15,10 +15,10 @@ from app.db.models import AuditLog, BusinessCard, Event, EventRegistrant, EventS
 from app.db.session import get_db
 from app.services.leads.service import _lead_code, normalize_phone
 from app.services.ocr.preprocess import InvalidImage, decode_and_prepare, detect_image_mime
+from app.services.research_matching import find_attendee_candidates, mark_registrant_identity_matched, registrant_identity_rows
 from app.services.storage.business_cards import storage
 from app.services.vision.client import extract_card
 from app.services.vision.exceptions import VisionConfigurationError, VisionUnavailable
-from app.api.v1.routes.event_workspaces import find_attendee_candidates
 
 router = APIRouter(prefix="/admin", tags=["staff card capture"])
 ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -216,14 +216,16 @@ async def create_card_capture(
 
     provider = settings.ocr_provider.lower()
     external_provider = provider in {"openrouter", "vertex"}
-    test_authorized = synthetic_test and user.role == "ADMIN"
+    if synthetic_test and external_ai_consent:
+        raise HTTPException(status_code=422, detail="Synthetic captures cannot record visitor AI consent.")
+    if external_ai_consent and not external_provider:
+        raise HTTPException(status_code=422, detail="Visitor AI consent only applies when an external OCR provider is configured.")
+    if external_ai_consent and not settings.staff_card_processing_rules_approved:
+        raise HTTPException(status_code=403, detail="Staff card processing rules are not approved for external AI processing.")
     should_extract = settings.ocr_enabled and (
         provider == "ollama"
-        or (external_provider and test_authorized)
-        or (external_provider and settings.staff_card_processing_rules_approved and external_ai_consent)
+        or (external_provider and settings.staff_card_processing_rules_approved and (synthetic_test or external_ai_consent))
     )
-    if external_ai_consent and not settings.staff_card_processing_rules_approved and not test_authorized:
-        raise HTTPException(status_code=403, detail="Staff card processing rules are not approved for external AI processing.")
 
     extraction: dict = {}
     capture_status = "pending_review"
@@ -283,8 +285,7 @@ async def create_card_capture(
                 if matched_lead is None:
                     lead = _make_lead(db, event, fields)
                     if matched_registrant:
-                        matched_registrant.match_status = "matched"
-                        matched_registrant.matched_lead_id = lead.id
+                        mark_registrant_identity_matched(db, matched_registrant, lead.id)
                 else:
                     lead = matched_lead
                 _attach_capture_to_lead(db, capture, lead, user, event, session, extraction)
@@ -390,13 +391,15 @@ def resolve_card_capture(capture_id: uuid.UUID, payload: CaptureReviewInput, db:
         registrant = db.scalar(select(EventRegistrant).where(EventRegistrant.id == payload.registrant_id, EventRegistrant.event_id == capture.event_id))
         if registrant is None:
             raise HTTPException(status_code=404, detail="Selected research registrant not found for this event.")
-        lead = db.get(Lead, registrant.matched_lead_id) if registrant.matched_lead_id else None
+        linked_lead_ids = {row.matched_lead_id for row in registrant_identity_rows(db, registrant.event_id, registrant) if row.matched_lead_id}
+        if len(linked_lead_ids) > 1:
+            raise HTTPException(status_code=409, detail="This research profile is linked to multiple leads. Choose a lead directly and reconcile the research records.")
+        lead = db.get(Lead, next(iter(linked_lead_ids))) if linked_lead_ids else None
         if lead is None:
             if not fields.get("full_name"):
                 raise HTTPException(status_code=422, detail="Enter the person's name before linking the research record.")
             lead = _make_lead(db, event, fields)
-        registrant.matched_lead_id = lead.id
-        registrant.match_status = "matched"
+        mark_registrant_identity_matched(db, registrant, lead.id)
     else:
         lead = db.get(Lead, capture.lead_id) if capture.lead_id else None
         if lead is None:

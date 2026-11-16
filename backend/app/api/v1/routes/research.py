@@ -108,6 +108,7 @@ def _parse_workbook(data: bytes) -> tuple[list[dict], list[str], list[dict]]:
                 ("Shortlist", "Shortlist Status", "Short List", "Latent Sig Fit", "Fit"),
                 ("short", "list"),
             )
+            strong_shortlist_sheet = "strong" in worksheet.title.casefold() and "shortlist" in worksheet.title.casefold()
             cse_col = _column(headers, ("CSE Status", "CSE Progress", "Research Status"), ("cse",))
             sheet_rows = 0
             sheet_errors = 0
@@ -129,7 +130,8 @@ def _parse_workbook(data: bytes) -> tuple[list[dict], list[str], list[dict]]:
                 source_row_id = _value(values, source_row_col)
                 shortlist = _value(values, shortlist_col)
                 errors: list[str] = []
-                if re.search(r"\bstrong\b", shortlist or "", re.I):
+                is_strong_row = bool(re.search(r"\bstrong\b", shortlist or "", re.I))
+                if is_strong_row or (strong_shortlist_sheet and not profile_id):
                     if not profile_id:
                         errors.append("Strong shortlist row is missing Profile ID.")
                     if not full_name:

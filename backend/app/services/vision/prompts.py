@@ -8,7 +8,7 @@ logos, stock-photo labels, and surrounding marketing copy.
 Set is_template to true when the image is explicitly a business-card template, sample, mockup,
 or editable design rather than a photo of a person's completed card. This includes headings
 such as "BUSINESS CARD TEMPLATE" or contact copy such as "Street Address Here", "805 STREET NAME CITY NAME",
-"username", "youremail@website.com", "www.website.com", "000.123.45678", "email.com", "websitename.com", or "Company Logo". For a template/mockup, treat every name
+"username", "youremail@website.com", "yourname@website.com", "www.website.com", "000.123.45678", "email.com", "websitename.com", or "Company Logo". For a template/mockup, treat every name
 and contact detail shown as demo content: set all contact fields to null and add a warning that
 the user should upload a photo of their actual card. Do not mistake example data for real
 contact details.

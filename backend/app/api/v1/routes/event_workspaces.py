@@ -1,11 +1,10 @@
 import re
 import uuid
 from datetime import date, datetime, timezone
-from difflib import SequenceMatcher
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -15,6 +14,10 @@ from app.db.models import (
     Interaction, Lead, Meeting, StaffCardCapture, User,
 )
 from app.db.session import get_db
+from app.services.research_matching import (
+    find_attendee_candidates, group_registrants, mark_registrant_identity_matched,
+    registrant_identity_key,
+)
 
 router = APIRouter(prefix="/admin", tags=["event workspaces"])
 MANAGERS = ("ADMIN", "MANAGER")
@@ -22,11 +25,25 @@ STAFF = ("ADMIN", "MANAGER", "SALES")
 MEETING_STATUSES = {"requested", "confirmed", "completed", "cancelled"}
 
 
+class SessionTemplateInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    name: str = Field(min_length=2, max_length=180)
+    venue: str | None = Field(default=None, max_length=180)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_session_range(self):
+        if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
+            raise ValueError("Session end time must be after its start time.")
+        return self
+
+
 class ProfileInput(BaseModel):
     name: str = Field(min_length=2, max_length=180)
     location: str | None = Field(default=None, max_length=180)
     venue: str | None = Field(default=None, max_length=180)
-    sessions_template: list[dict] = Field(default_factory=list, max_length=100)
+    sessions_template: list[SessionTemplateInput] = Field(default_factory=list, max_length=100)
 
 
 class EventFromProfileInput(BaseModel):
@@ -85,6 +102,18 @@ class MeetingConfirmInput(BaseModel):
     follow_up_due_at: datetime | None = None
 
 
+class LeadMeetingInput(BaseModel):
+    interaction_id: uuid.UUID | None = None
+    scheduled_at: datetime | None = None
+    employee_id: uuid.UUID | None = None
+    topics: list[str] = Field(default_factory=list, max_length=30)
+    notes: str = Field(default="", max_length=10000)
+    demo_presented: bool = False
+    status: Literal["requested", "confirmed", "completed", "cancelled"] = "requested"
+    next_steps: str = Field(default="", max_length=10000)
+    follow_up_due_at: datetime | None = None
+
+
 class RegistrantMatchInput(BaseModel):
     lead_id: uuid.UUID
 
@@ -122,55 +151,6 @@ def _meeting_json(item: Meeting, db: Session) -> dict:
     }
 
 
-def _norm(value: str | None) -> str:
-    return re.sub(r"[^a-z0-9]", "", (value or "").casefold())
-
-
-def find_attendee_candidates(db: Session, event_id: uuid.UUID | None, fields: dict, limit: int = 8) -> list[dict]:
-    """Return identifier and name/company candidates without treating imported rows as live leads."""
-    email = (fields.get("email") or "").strip().casefold()
-    phone = re.sub(r"\D", "", fields.get("phone") or "")
-    name, company = _norm(fields.get("full_name")), _norm(fields.get("company"))
-    results: list[dict] = []
-    leads = db.scalars(select(Lead).order_by(Lead.created_at.desc()).limit(5000)).all()
-    for lead in leads:
-        email_match = bool(email and lead.normalized_email and email == lead.normalized_email.casefold())
-        phone_match = bool(phone and lead.normalized_phone and phone == re.sub(r"\D", "", lead.normalized_phone))
-        name_score = SequenceMatcher(None, name, _norm(lead.full_name)).ratio() if name and lead.full_name else 0
-        company_score = SequenceMatcher(None, company, _norm(lead.company)).ratio() if company and lead.company else 0
-        exact_name_company = bool(name and company and name == _norm(lead.full_name) and company == _norm(lead.company))
-        score = 1.0 if email_match or phone_match or exact_name_company else 0.68 * name_score + 0.32 * company_score
-        if email_match or phone_match or exact_name_company or (name_score >= 0.90 and company_score >= 0.88):
-            results.append({
-                "kind": "lead", "id": str(lead.id), "full_name": lead.full_name, "company": lead.company,
-                "email": lead.email, "phone": lead.phone, "score": round(score, 3),
-                "confidence": "high" if email_match or phone_match or exact_name_company else "possible",
-                "matched_by": "email" if email_match else "phone" if phone_match else "name_company",
-            })
-
-    registrants_query = select(EventRegistrant)
-    if event_id:
-        registrants_query = registrants_query.where(EventRegistrant.event_id == event_id)
-    registrants = db.scalars(registrants_query.order_by(EventRegistrant.created_at.desc()).limit(5000)).all()
-    for registrant in registrants:
-        email_match = bool(email and registrant.email and email == registrant.email.strip().casefold())
-        phone_match = bool(phone and registrant.phone and phone == re.sub(r"\D", "", registrant.phone))
-        name_score = SequenceMatcher(None, name, _norm(registrant.full_name)).ratio() if name and registrant.full_name else 0
-        company_score = SequenceMatcher(None, company, _norm(registrant.company)).ratio() if company and registrant.company else 0
-        exact_name_company = bool(name and company and name == _norm(registrant.full_name) and company == _norm(registrant.company))
-        score = 1.0 if email_match or phone_match or exact_name_company else 0.68 * name_score + 0.32 * company_score
-        if email_match or phone_match or exact_name_company or (name_score >= 0.90 and company_score >= 0.88):
-            results.append({
-                "kind": "registrant", "id": str(registrant.id), "full_name": registrant.full_name,
-                "company": registrant.company, "email": registrant.email, "phone": registrant.phone,
-                "profile_id": registrant.profile_id, "match_status": registrant.match_status,
-                "score": round(score, 3), "confidence": "high" if email_match or phone_match or exact_name_company else "possible",
-                "matched_by": "email" if email_match else "phone" if phone_match else "name_company",
-            })
-    results.sort(key=lambda item: (item["score"], item["kind"] == "lead"), reverse=True)
-    return results[:limit]
-
-
 @router.get("/event-profiles")
 def list_event_profiles(db: Session = Depends(get_db), user: User = Depends(current_user)):
     profiles = db.scalars(select(EventProfile).order_by(EventProfile.name)).all()
@@ -182,9 +162,8 @@ def list_event_profiles(db: Session = Depends(get_db), user: User = Depends(curr
 
 @router.post("/event-profiles", status_code=201)
 def create_event_profile(payload: ProfileInput, db: Session = Depends(get_db), user: User = Depends(require_roles(*MANAGERS))):
-    profile = EventProfile(**payload.model_dump(), created_by=user.id)
+    profile = EventProfile(**payload.model_dump(mode="json"), created_by=user.id)
     db.add(profile)
-    db.flush()
     db.flush()
     db.add(AuditLog(user_id=user.id, action="event_profile_created", entity_type="event_profile", entity_id=str(profile.id), metadata_json={}))
     db.commit()
@@ -205,11 +184,14 @@ def create_event_from_profile(payload: EventFromProfileInput, db: Session = Depe
     db.add(event)
     db.flush()
     for template in profile.sessions_template:
-        name = str(template.get("name") or "").strip()
-        if not name:
-            continue
+        session_template = SessionTemplateInput.model_validate(template)
+        name = session_template.name
         session_slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")[:120] or f"session-{uuid.uuid4().hex[:8]}"
-        db.add(EventSession(event_id=event.id, name=name[:180], slug=session_slug, venue=template.get("venue") or profile.venue))
+        db.add(EventSession(
+            event_id=event.id, name=name, slug=session_slug,
+            venue=session_template.venue or profile.venue,
+            starts_at=session_template.starts_at, ends_at=session_template.ends_at,
+        ))
     db.add(AuditLog(user_id=user.id, action="event_created_from_profile", entity_type="event", entity_id=str(event.id), metadata_json={"profile_id": str(profile.id)}))
     db.commit()
     return {"id": str(event.id), "name": event.name, "slug": event.slug, "profile_id": str(profile.id)}
@@ -289,11 +271,16 @@ def assign_event_staff(event_id: uuid.UUID, payload: StaffInput, db: Session = D
 def event_dashboard(event_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(current_user)):
     event = _event_or_404(db, event_id)
     registrants = db.scalars(select(EventRegistrant).where(EventRegistrant.event_id == event.id)).all()
-    total_registrants = len({("profile", item.profile_id) if item.profile_id else ("source", item.source_key) for item in registrants})
+    registrant_groups = group_registrants(registrants)
+    total_registrants = len(registrant_groups)
     shortlist_total = sum(bool(item.shortlist_status) for item in registrants)
     shortlist_strong = sum((item.shortlist_status or "").strip().casefold() == "strong" for item in registrants)
     cse_total = sum(bool(item.cse_status) for item in registrants)
-    matched = sum(item.match_status == "matched" for item in registrants)
+    matched = sum(
+        len({item.matched_lead_id for item in group if item.matched_lead_id}) == 1
+        and not any(item.match_status == "suggested" for item in group)
+        for group in registrant_groups.values()
+    )
     submissions = db.scalar(select(func.count(Interaction.id)).where(
         Interaction.event_id == event.id,
         Interaction.capture_method.in_(["manual", "business_card"]),
@@ -375,6 +362,8 @@ def create_event_meeting(event_id: uuid.UUID, payload: MeetingInput, db: Session
     item = Meeting(event_id=event_id, created_by=user.id, employee_id=employee_id, **payload.model_dump(exclude={"employee_id"}))
     db.add(item)
     db.flush()
+    if interaction and item.status in {"confirmed", "completed"}:
+        interaction.status = "meeting"
     db.add(AuditLog(user_id=user.id, action="meeting_recorded", entity_type="meeting", entity_id=str(item.id), metadata_json={"status": item.status}))
     db.commit()
     return _meeting_json(item, db)
@@ -411,6 +400,41 @@ def confirm_meeting(lead_id: uuid.UUID, payload: MeetingConfirmInput, db: Sessio
     return _meeting_json(item, db)
 
 
+@router.post("/leads/{lead_id}/meetings", status_code=201)
+def create_lead_meeting(lead_id: uuid.UUID, payload: LeadMeetingInput, db: Session = Depends(get_db), user: User = Depends(require_roles(*STAFF))):
+    lead = db.get(Lead, lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found.")
+    interaction = db.get(Interaction, payload.interaction_id) if payload.interaction_id else db.scalar(
+        select(Interaction).where(Interaction.lead_id == lead.id).order_by(Interaction.created_at.desc()).limit(1)
+    )
+    if interaction is None or interaction.lead_id != lead.id:
+        raise HTTPException(status_code=422, detail="Choose an encounter for this meeting.")
+    if user.role == "SALES" and interaction.event_id and not db.scalar(select(EventStaff.id).where(EventStaff.event_id == interaction.event_id, EventStaff.user_id == user.id)):
+        raise HTTPException(status_code=403, detail="You are not assigned to work on this event.")
+    if user.role == "SALES" and interaction.assigned_to not in (None, user.id):
+        raise HTTPException(status_code=403, detail="You can only record meetings for work assigned to you.")
+    employee_id = payload.employee_id or user.id
+    employee = db.get(User, employee_id) if employee_id else None
+    if employee_id and (employee is None or not employee.is_active):
+        raise HTTPException(status_code=422, detail="Choose an active team member for this meeting.")
+    if user.role == "SALES" and employee_id != user.id:
+        raise HTTPException(status_code=403, detail="You can assign the meeting only to yourself.")
+    item = Meeting(
+        event_id=interaction.event_id, lead_id=lead.id, interaction_id=interaction.id,
+        scheduled_at=payload.scheduled_at, employee_id=employee_id, topics=payload.topics,
+        notes=payload.notes, demo_presented=payload.demo_presented, status=payload.status,
+        next_steps=payload.next_steps, follow_up_due_at=payload.follow_up_due_at, created_by=user.id,
+    )
+    if item.status in {"confirmed", "completed"}:
+        interaction.status = "meeting"
+    db.add(item)
+    db.flush()
+    db.add(AuditLog(user_id=user.id, action="meeting_recorded", entity_type="meeting", entity_id=str(item.id), metadata_json={"status": item.status, "lead_id": str(lead.id)}))
+    db.commit()
+    return _meeting_json(item, db)
+
+
 @router.patch("/meetings/{meeting_id}")
 def update_meeting(meeting_id: uuid.UUID, payload: MeetingPatch, db: Session = Depends(get_db), user: User = Depends(require_roles(*STAFF))):
     item = db.get(Meeting, meeting_id)
@@ -418,12 +442,18 @@ def update_meeting(meeting_id: uuid.UUID, payload: MeetingPatch, db: Session = D
         raise HTTPException(status_code=404, detail="Meeting not found.")
     if user.role == "SALES" and item.employee_id not in (None, user.id):
         raise HTTPException(status_code=403, detail="You can update meetings assigned to you.")
-    if payload.employee_id is not None and not db.get(User, payload.employee_id):
-        raise HTTPException(status_code=422, detail="Choose an active team member.")
+    if payload.employee_id is not None:
+        employee = db.get(User, payload.employee_id)
+        if employee is None or not employee.is_active:
+            raise HTTPException(status_code=422, detail="Choose an active team member.")
     if user.role == "SALES" and payload.employee_id not in (None, user.id):
         raise HTTPException(status_code=403, detail="You can assign the meeting only to yourself.")
     for key in payload.model_fields_set:
         setattr(item, key, getattr(payload, key))
+    if payload.status in {"confirmed", "completed"} and item.interaction_id:
+        interaction = db.get(Interaction, item.interaction_id)
+        if interaction:
+            interaction.status = "meeting"
     db.add(AuditLog(user_id=user.id, action="meeting_updated", entity_type="meeting", entity_id=str(item.id), metadata_json={"status": item.status}))
     db.commit()
     return _meeting_json(item, db)
@@ -438,7 +468,7 @@ def registrant_matches(event_id: uuid.UUID, registrant_id: uuid.UUID, db: Sessio
     return find_attendee_candidates(db, event_id, {
         "full_name": registrant.full_name, "company": registrant.company,
         "email": registrant.email, "phone": registrant.phone,
-    })
+    }, exclude_registrant_identity=registrant_identity_key(registrant))
 
 
 @router.post("/events/{event_id}/research/registrants/{registrant_id}/match")
@@ -447,8 +477,7 @@ def match_registrant(event_id: uuid.UUID, registrant_id: uuid.UUID, payload: Reg
     lead = db.get(Lead, payload.lead_id)
     if registrant is None or lead is None:
         raise HTTPException(status_code=404, detail="Research registrant or lead not found.")
-    registrant.matched_lead_id = lead.id
-    registrant.match_status = "matched"
+    matched_rows = mark_registrant_identity_matched(db, registrant, lead.id)
     db.add(AuditLog(user_id=user.id, action="research_registrant_matched", entity_type="event_registrant", entity_id=str(registrant.id), metadata_json={"lead_id": str(lead.id)}))
     db.commit()
-    return {"id": str(registrant.id), "matched_lead_id": str(lead.id), "match_status": registrant.match_status}
+    return {"id": str(registrant.id), "matched_lead_id": str(lead.id), "match_status": "matched", "matched_source_rows": matched_rows}

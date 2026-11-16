@@ -4,10 +4,11 @@ from io import BytesIO
 from PIL import Image
 import unittest
 from unittest.mock import patch
+from urllib.request import Request
 
 from app.core.config import settings
 from app.services.vision.client import _request, extract_card
-from app.services.vision.exceptions import VisionUnavailable
+from app.services.vision.exceptions import VisionConfigurationError, VisionUnavailable
 
 
 class VisionClientTests(unittest.TestCase):
@@ -91,6 +92,30 @@ class VisionClientTests(unittest.TestCase):
         self.assertIsNone(result.address)
         self.assertTrue(result.warnings)
         self.assertEqual(len(result.warnings), 1)
+
+    def test_placeholder_fields_override_model_template_false_for_designed_sample(self):
+        result_body = {"choices": [{"message": {"content": json.dumps({
+            "full_name": "JHON MICHAI", "company": "Design Studio", "job_title": "Graphic Designer",
+            "email": "yourname@website.com", "phone": "000.123.45678", "website": "www.websitename.com",
+            "address": "805 STREET NAME CITY NAME, 123456", "is_template": False,
+            "warnings": [], "uncertain_fields": [],
+        })}}]}
+
+        with patch("app.services.vision.client.urlopen", return_value=self.response(result_body)):
+            result = _request([(b"normalized-image", "image/jpeg")])
+
+        self.assertTrue(result.is_template)
+        for field in ("full_name", "company", "job_title", "email", "phone", "website", "address"):
+            self.assertIsNone(getattr(result, field))
+        self.assertTrue(any("template" in warning.lower() for warning in result.warnings))
+
+    def test_vision_client_rejects_non_http_provider_urls(self):
+        settings.ocr_provider = "vertex"
+        with patch("app.services.vision.client.build_vertex_request", return_value=Request("file:///etc/passwd")), \
+                patch("app.services.vision.client.urlopen") as open_url:
+            with self.assertRaises(VisionConfigurationError):
+                _request([(b"private-image", "image/png")])
+        open_url.assert_not_called()
 
     def image(self):
         output = BytesIO()

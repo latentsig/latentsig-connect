@@ -100,6 +100,7 @@ jobs:
         env:
           APP_ENV: development
           DATABASE_URL: postgresql+psycopg://latentsig:ci-password@localhost:5432/latentsig
+          LATENTSIG_TEST_POSTGRES_URL: postgresql+psycopg://latentsig:ci-password@localhost:5432/latentsig
           REDIS_URL: redis://localhost:6379/0
       - run: alembic check
         env:

@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.db.models import BusinessCard, Event, EventRegistrant, EventSession, IntegrationJob, Interaction, Lead, StaffCardCapture, User
+from app.db.models import BusinessCard, Event, EventRegistrant, EventSession, IntegrationJob, Interaction, Lead, Meeting, StaffCardCapture, User
 from app.db.session import get_db
 from app.core.config import Settings, settings
 from app.core import rate_limit as rate_limit_module
@@ -386,6 +386,7 @@ class LeadApiTests(unittest.TestCase):
         sheet.append(["Profile ID", "Name", "Designation", "Company", "Latent Sig Fit"])
         sheet.append(["BTS_2026_000001", "Jordan Sample", "Director", "Example Labs", "Strong"])
         sheet.append(["BTS_2026_000002", "Casey Sample", "Founder", None, "Strong"])
+        sheet.append([None, "Riley Sample", "Director", "Example Labs", None])
         payload = io.BytesIO()
         source.save(payload)
         source.close()
@@ -396,10 +397,299 @@ class LeadApiTests(unittest.TestCase):
         self.assertEqual(parsed[0]["row_data"]["derived"]["shortlist_status"], "Strong")
         self.assertEqual(parsed[0]["validation_errors"], [])
         self.assertEqual(parsed[1]["validation_errors"], ["Strong shortlist row is missing a company."])
+        self.assertEqual(parsed[2]["validation_errors"], ["Strong shortlist row is missing Profile ID."])
         self.assertEqual(errors, [{
             "sheet_name": "Strong shortlist", "source_row": 3,
             "message": "Strong shortlist row is missing a company.",
+        }, {
+            "sheet_name": "Strong shortlist", "source_row": 4,
+            "message": "Strong shortlist row is missing Profile ID.",
         }])
+
+    def test_event_profiles_copy_session_dates_venue_and_staff_assignments(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        profile = self.client.post("/api/v1/admin/event-profiles", json={
+            "name": "Summit Reuse Profile", "location": "Bengaluru", "venue": "BIEC",
+            "sessions_template": [{
+                "name": "Expo Hall", "venue": "Hall 2",
+                "starts_at": "2026-11-17T10:00:00+05:30", "ends_at": "2026-11-17T12:00:00+05:30",
+            }],
+        })
+        self.assertEqual(profile.status_code, 201, profile.text)
+        created = self.client.post("/api/v1/admin/events/from-profile", json={
+            "profile_id": profile.json()["id"], "name": "Summit Test Workspace", "slug": "summit-test-workspace",
+            "start_date": "2026-11-17", "end_date": "2026-11-19",
+        })
+        self.assertEqual(created.status_code, 201, created.text)
+        event_id = created.json()["id"]
+        sessions = self.client.get(f"/api/v1/admin/events/{event_id}/sessions")
+        self.assertEqual(sessions.status_code, 200, sessions.text)
+        self.assertEqual(len(sessions.json()), 1)
+        self.assertEqual(sessions.json()[0]["name"], "Expo Hall")
+        self.assertEqual(sessions.json()[0]["venue"], "Hall 2")
+        self.assertTrue(sessions.json()[0]["starts_at"].startswith("2026-11-17T10:00:00"))
+        self.assertTrue(sessions.json()[0]["ends_at"].startswith("2026-11-17T12:00:00"))
+        with self.TestSession() as db:
+            sales_id = str(db.scalar(select(User.id).where(User.email == "bhoomika@latentsig.com")))
+        assigned = self.client.put(f"/api/v1/admin/events/{event_id}/staff", json={"user_ids": [sales_id]})
+        self.assertEqual(assigned.status_code, 200, assigned.text)
+        staff = self.client.get(f"/api/v1/admin/events/{event_id}/staff")
+        self.assertEqual([item["user_id"] for item in staff.json()], [sales_id])
+        invalid_session = self.client.post(f"/api/v1/admin/events/{event_id}/sessions", json={
+            "name": "Invalid", "slug": "invalid", "starts_at": "2026-11-17T12:00:00+05:30", "ends_at": "2026-11-17T10:00:00+05:30",
+        })
+        self.assertEqual(invalid_session.status_code, 422)
+
+    def test_lead_meeting_workflow_records_time_owner_status_and_follow_up(self):
+        submission = self.submit(email="meeting@example.com", phone="+14155552670")
+        self.assertEqual(submission.status_code, 201, submission.text)
+        lead_id, interaction_id = submission.json()["id"], submission.json()["interaction_id"]
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            sales_id = str(db.scalar(select(User.id).where(User.email == "bhoomika@latentsig.com")))
+        meeting = self.client.post(f"/api/v1/admin/leads/{lead_id}/meetings", json={
+            "interaction_id": interaction_id, "scheduled_at": "2026-11-18T04:30:00+00:00", "employee_id": sales_id,
+            "topics": ["Agentic AI"], "notes": "Meeting notes", "demo_presented": True,
+            "status": "requested", "next_steps": "Share the demo", "follow_up_due_at": "2026-11-20T04:30:00+00:00",
+        })
+        self.assertEqual(meeting.status_code, 201, meeting.text)
+        self.assertEqual(meeting.json()["status"], "requested")
+        self.assertEqual(meeting.json()["employee_id"], sales_id)
+        self.assertEqual(meeting.json()["employee_name"], "Sales User")
+        self.assertTrue(meeting.json()["scheduled_at"].startswith("2026-11-18T04:30:00"))
+        self.assertEqual(meeting.json()["topics"], ["Agentic AI"])
+        self.assertTrue(meeting.json()["demo_presented"])
+        self.assertEqual(meeting.json()["next_steps"], "Share the demo")
+        updated = self.client.patch(f"/api/v1/admin/meetings/{meeting.json()['id']}", json={"status": "confirmed"})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["status"], "confirmed")
+        with self.TestSession() as db:
+            stored = db.get(Meeting, uuid.UUID(meeting.json()["id"]))
+            interaction = db.get(Interaction, uuid.UUID(interaction_id))
+            self.assertIsNotNone(stored.follow_up_due_at)
+            self.assertEqual(interaction.status, "meeting")
+            db.get(User, uuid.UUID(sales_id)).is_active = False
+            db.commit()
+        inactive_owner = self.client.patch(f"/api/v1/admin/meetings/{meeting.json()['id']}", json={"employee_id": sales_id})
+        self.assertEqual(inactive_owner.status_code, 422)
+
+    def test_card_capture_holds_ambiguous_matches_and_links_contactless_registrants(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            event_id = str(event.id)
+            db.add_all([
+                Lead(lead_code="DUPLICATE-001", full_name="Alex Example", company="Example Systems"),
+                Lead(lead_code="DUPLICATE-002", full_name="Alex Example", company="Example Systems"),
+                EventRegistrant(event_id=event.id, profile_id="CONTACTLESS-001", source_key="profile:contactless-001:sheet:registrants:row:2", source_filename="research.xlsx", sheet_name="Registrants", source_row=2, full_name="Jordan Research", company="Research Systems", raw_data={}),
+            ])
+            db.commit()
+            candidate_lead_id = str(db.scalar(select(Lead.id).where(Lead.lead_code == "DUPLICATE-001")))
+        image = io.BytesIO()
+        Image.new("RGB", (200, 120), "white").save(image, format="JPEG")
+        image_bytes = image.getvalue()
+        extractions = [
+            CardExtraction(full_name="Alex Example", company="Example Systems"),
+            CardExtraction(full_name="Jordan Research", company="Research Systems"),
+        ]
+        with patch.object(settings, "ocr_provider", "ollama"), patch.object(settings, "ocr_enabled", True), \
+                patch.object(staff_capture_routes, "extract_card", side_effect=extractions), \
+                patch.object(staff_capture_routes.storage, "save_private", return_value=("test-match-card.jpg", len(image_bytes))):
+            ambiguous = self.client.post(
+                "/api/v1/admin/card-captures", data={"event_id": event_id},
+                files={"file": ("ambiguous.jpg", image_bytes, "image/jpeg")},
+            )
+            contactless = self.client.post(
+                "/api/v1/admin/card-captures", data={"event_id": event_id},
+                files={"file": ("contactless.jpg", image_bytes, "image/jpeg")},
+            )
+        self.assertEqual(ambiguous.status_code, 201, ambiguous.text)
+        self.assertEqual(ambiguous.json()["status"], "pending_match")
+        self.assertEqual(len(ambiguous.json()["candidates"]), 2)
+        self.assertIsNone(ambiguous.json()["lead_id"])
+        resolved = self.client.post(
+            f"/api/v1/admin/card-captures/{ambiguous.json()['id']}/resolve",
+            json={"lead_id": candidate_lead_id},
+        )
+        self.assertEqual(resolved.status_code, 200, resolved.text)
+        self.assertEqual(resolved.json()["status"], "linked")
+        self.assertEqual(resolved.json()["lead_id"], candidate_lead_id)
+        self.assertEqual(contactless.status_code, 201, contactless.text)
+        self.assertEqual(contactless.json()["status"], "linked")
+        with self.TestSession() as db:
+            registrant = db.scalar(select(EventRegistrant).where(EventRegistrant.profile_id == "CONTACTLESS-001"))
+            linked = db.get(Lead, uuid.UUID(contactless.json()["lead_id"]))
+            self.assertEqual(registrant.match_status, "matched")
+            self.assertEqual(registrant.matched_lead_id, linked.id)
+            self.assertEqual(linked.full_name, "Jordan Research")
+            self.assertEqual(linked.company, "Research Systems")
+            self.assertIsNone(linked.email)
+            self.assertIsNone(linked.phone)
+
+    def test_duplicate_workbook_rows_share_one_match_identity_and_dashboard_count(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            event_id = event.id
+            db.add_all([
+                EventRegistrant(
+                    event_id=event_id, profile_id="PROFILE-REPEATED-001",
+                    source_key="profile:profile-repeated-001:sheet:registrants:row:2",
+                    source_filename="research.xlsx", sheet_name="Registrants", source_row=2,
+                    full_name="Casey Research", company="Research Systems", raw_data={},
+                ),
+                EventRegistrant(
+                    event_id=event_id, profile_id="PROFILE-REPEATED-001",
+                    source_key="profile:profile-repeated-001:sheet:strong-shortlist:row:7",
+                    source_filename="research.xlsx", sheet_name="Strong shortlist", source_row=7,
+                    full_name="Casey Research", company="Research Systems", raw_data={"Latent Sig Fit": "Strong"},
+                    shortlist_status="Strong",
+                ),
+            ])
+            db.commit()
+
+        submission = self.submit(
+            full_name="Casey Research", company="Research Systems", email="casey-research@example.com",
+            phone="+14155552677", event_slug="test-event",
+        )
+        self.assertEqual(submission.status_code, 201, submission.text)
+        with self.TestSession() as db:
+            rows = db.scalars(select(EventRegistrant).where(EventRegistrant.profile_id == "PROFILE-REPEATED-001")).all()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual({row.match_status for row in rows}, {"matched"})
+            self.assertEqual({row.matched_lead_id for row in rows}, {uuid.UUID(submission.json()["id"])})
+            capture_event_id = str(event_id)
+
+        image = io.BytesIO()
+        Image.new("RGB", (200, 120), "white").save(image, format="JPEG")
+        image_bytes = image.getvalue()
+        extraction = CardExtraction(full_name="Casey Research", company="Research Systems", job_title="Researcher")
+        with patch.object(settings, "ocr_provider", "ollama"), patch.object(settings, "ocr_enabled", True), \
+                patch.object(staff_capture_routes, "extract_card", return_value=extraction), \
+                patch.object(staff_capture_routes.storage, "save_private", return_value=("repeated-profile-card.jpg", len(image_bytes))):
+            capture = self.client.post(
+                "/api/v1/admin/card-captures", data={"event_id": capture_event_id},
+                files={"file": ("casey-card.jpg", image_bytes, "image/jpeg")},
+            )
+        self.assertEqual(capture.status_code, 201, capture.text)
+        self.assertEqual(capture.json()["status"], "linked")
+        self.assertEqual(capture.json()["lead_id"], submission.json()["id"])
+        self.assertEqual(len(capture.json()["candidates"]), 1)
+        self.assertEqual(capture.json()["candidates"][0]["kind"], "lead")
+        dashboard = self.client.get(f"/api/v1/admin/events/{capture_event_id}/dashboard")
+        self.assertEqual(dashboard.status_code, 200, dashboard.text)
+        self.assertEqual(dashboard.json()["research"]["unique_registrants"], 1)
+        self.assertEqual(dashboard.json()["research"]["matched_registrants"], 1)
+        self.assertEqual(dashboard.json()["research"]["unmatched_registrants"], 0)
+        self.assertEqual(dashboard.json()["research"]["shortlist_progress"]["total_rows"], 2)
+        self.assertEqual(dashboard.json()["activity"]["unique_submitted_contacts"], 1)
+        self.assertEqual(dashboard.json()["activity"]["staff_confirmed_encounters"], 1)
+
+    def test_contactless_card_capture_collapses_duplicate_worksheet_candidates(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            event_id = str(event.id)
+            for sheet_name, source_row in (("Registrants", 2), ("Clients-Strong", 14)):
+                db.add(EventRegistrant(
+                    event_id=event.id, profile_id="PROFILE-CARD-001",
+                    source_key=f"profile:profile-card-001:sheet:{sheet_name.casefold()}:row:{source_row}",
+                    source_filename="research.xlsm", sheet_name=sheet_name, source_row=source_row,
+                    full_name="Morgan Research", company="Research Systems", raw_data={},
+                ))
+            db.commit()
+
+        image = io.BytesIO()
+        Image.new("RGB", (200, 120), "white").save(image, format="JPEG")
+        image_bytes = image.getvalue()
+        extraction = CardExtraction(full_name="Morgan Research", company="Research Systems", job_title="Director")
+        with patch.object(settings, "ocr_provider", "ollama"), patch.object(settings, "ocr_enabled", True), \
+                patch.object(staff_capture_routes, "extract_card", return_value=extraction), \
+                patch.object(staff_capture_routes.storage, "save_private", return_value=("contactless-profile-card.jpg", len(image_bytes))):
+            response = self.client.post(
+                "/api/v1/admin/card-captures", data={"event_id": event_id},
+                files={"file": ("morgan-card.jpg", image_bytes, "image/jpeg")},
+            )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["status"], "linked")
+        self.assertEqual(len(response.json()["candidates"]), 1)
+        self.assertEqual(response.json()["candidates"][0]["kind"], "registrant")
+        self.assertEqual(response.json()["candidates"][0]["source_records"], 2)
+        with self.TestSession() as db:
+            rows = db.scalars(select(EventRegistrant).where(EventRegistrant.profile_id == "PROFILE-CARD-001")).all()
+            lead = db.get(Lead, uuid.UUID(response.json()["lead_id"]))
+            self.assertEqual({row.match_status for row in rows}, {"matched"})
+            self.assertEqual({row.matched_lead_id for row in rows}, {lead.id})
+            self.assertIsNone(lead.email)
+            self.assertIsNone(lead.phone)
+
+    def test_distinct_profile_ids_with_same_name_company_remain_ambiguous(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            event_id = str(event.id)
+            for profile_id, sheet_name, source_row in (
+                ("PROFILE-AMBIGUOUS-001", "Registrants", 2),
+                ("PROFILE-AMBIGUOUS-002", "Clients-Strong", 9),
+            ):
+                db.add(EventRegistrant(
+                    event_id=event.id, profile_id=profile_id,
+                    source_key=f"profile:{profile_id.casefold()}:sheet:{sheet_name.casefold()}:row:{source_row}",
+                    source_filename="research.xlsx", sheet_name=sheet_name, source_row=source_row,
+                    full_name="Taylor Example", company="Example Systems", raw_data={},
+                ))
+            db.commit()
+
+        image = io.BytesIO()
+        Image.new("RGB", (200, 120), "white").save(image, format="JPEG")
+        image_bytes = image.getvalue()
+        extraction = CardExtraction(full_name="Taylor Example", company="Example Systems")
+        with patch.object(settings, "ocr_provider", "ollama"), patch.object(settings, "ocr_enabled", True), \
+                patch.object(staff_capture_routes, "extract_card", return_value=extraction), \
+                patch.object(staff_capture_routes.storage, "save_private", return_value=("ambiguous-profile-card.jpg", len(image_bytes))):
+            response = self.client.post(
+                "/api/v1/admin/card-captures", data={"event_id": event_id},
+                files={"file": ("taylor-card.jpg", image_bytes, "image/jpeg")},
+            )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["status"], "pending_match")
+        self.assertEqual(len(response.json()["candidates"]), 2)
+        self.assertEqual({item["profile_id"] for item in response.json()["candidates"]}, {
+            "PROFILE-AMBIGUOUS-001", "PROFILE-AMBIGUOUS-002",
+        })
+        self.assertIsNone(response.json()["lead_id"])
+
+    def test_manual_registrant_match_links_all_rows_for_profile_id(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        with self.TestSession() as db:
+            event = db.scalar(select(Event).where(Event.slug == "test-event"))
+            event_id = event.id
+            lead = Lead(lead_code="PROFILE-MANUAL-001", full_name="Robin Research", company="Systems Lab")
+            db.add(lead)
+            db.flush()
+            rows = []
+            for sheet_name, source_row in (("Registrants", 3), ("Design Partners", 8)):
+                row = EventRegistrant(
+                    event_id=event.id, profile_id="PROFILE-MANUAL-001",
+                    source_key=f"profile:profile-manual-001:sheet:{sheet_name.casefold()}:row:{source_row}",
+                    source_filename="research.xlsx", sheet_name=sheet_name, source_row=source_row,
+                    full_name="Robin Research", company="Systems Lab", raw_data={},
+                )
+                db.add(row)
+                rows.append(row)
+            db.commit()
+            event_id, registrant_id, lead_id = str(event_id), str(rows[0].id), str(lead.id)
+
+        response = self.client.post(
+            f"/api/v1/admin/events/{event_id}/research/registrants/{registrant_id}/match",
+            json={"lead_id": lead_id},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["matched_source_rows"], 2)
+        with self.TestSession() as db:
+            rows = db.scalars(select(EventRegistrant).where(EventRegistrant.profile_id == "PROFILE-MANUAL-001")).all()
+            self.assertEqual({row.match_status for row in rows}, {"matched"})
+            self.assertEqual({row.matched_lead_id for row in rows}, {uuid.UUID(lead_id)})
 
     def test_staff_card_capture_saves_incomplete_lead_without_inventing_consent(self):
         self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
@@ -540,6 +830,66 @@ class LeadApiTests(unittest.TestCase):
         self.assertFalse(skipped.json()["external_ai_consent_recorded"])
         self.assertIn("skipped", skipped.json()["error"])
         extract.assert_not_called()
+
+    def test_synthetic_card_cannot_bypass_external_ai_consent(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        image = io.BytesIO()
+        Image.new("RGB", (200, 120), "white").save(image, format="JPEG")
+        image_bytes = image.getvalue()
+        with patch.object(settings, "ocr_provider", "openrouter"), \
+                patch.object(settings, "ocr_enabled", True), \
+                patch.object(settings, "staff_card_processing_rules_approved", False), \
+                patch.object(staff_capture_routes, "extract_card") as extract, \
+                patch.object(staff_capture_routes.storage, "save_private", return_value=("synthetic-private-card.jpg", len(image_bytes))):
+            synthetic = self.client.post(
+                "/api/v1/admin/card-captures",
+                data={"synthetic_test": "true"},
+                files={"file": ("synthetic.jpg", image_bytes, "image/jpeg")},
+            )
+            fabricated_consent = self.client.post(
+                "/api/v1/admin/card-captures",
+                data={"synthetic_test": "true", "external_ai_consent": "true"},
+                files={"file": ("synthetic.jpg", image_bytes, "image/jpeg")},
+            )
+        self.assertEqual(synthetic.status_code, 201, synthetic.text)
+        self.assertTrue(synthetic.json()["synthetic_test"])
+        self.assertTrue(synthetic.json()["exclude_from_analytics"])
+        self.assertEqual(synthetic.json()["status"], "pending_review")
+        self.assertFalse(synthetic.json()["external_ai_consent_recorded"])
+        self.assertEqual(fabricated_consent.status_code, 422, fabricated_consent.text)
+        self.assertIn("cannot record visitor AI consent", fabricated_consent.json()["detail"])
+        extract.assert_not_called()
+        self.assertEqual(self.client.get("/api/v1/admin/card-captures").json()["total"], 0)
+        visible_tests = self.client.get("/api/v1/admin/card-captures?include_synthetic=true")
+        self.assertEqual(visible_tests.json()["total"], 1)
+        with patch.object(staff_capture_routes.storage, "delete") as delete_storage:
+            removed = self.client.delete(f"/api/v1/admin/card-captures/{synthetic.json()['id']}")
+        self.assertEqual(removed.status_code, 204)
+        delete_storage.assert_called_once()
+
+    def test_approved_synthetic_card_uses_external_ocr_without_fabricating_consent(self):
+        self.assertEqual(self.sign_in("bharat@latentsig.com").status_code, 200)
+        image = io.BytesIO()
+        Image.new("RGB", (200, 120), "white").save(image, format="JPEG")
+        image_bytes = image.getvalue()
+        template = CardExtraction(is_template=True, warnings=["This image looks like a card template or mockup."])
+        with patch.object(settings, "ocr_provider", "openrouter"), \
+                patch.object(settings, "ocr_enabled", True), \
+                patch.object(settings, "staff_card_processing_rules_approved", True), \
+                patch.object(staff_capture_routes, "extract_card", return_value=template) as extract, \
+                patch.object(staff_capture_routes.storage, "save_private", return_value=("approved-synthetic-card.jpg", len(image_bytes))):
+            response = self.client.post(
+                "/api/v1/admin/card-captures",
+                data={"synthetic_test": "true"},
+                files={"file": ("synthetic-template.jpg", image_bytes, "image/jpeg")},
+            )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["status"], "template_detected")
+        self.assertTrue(response.json()["synthetic_test"])
+        self.assertTrue(response.json()["exclude_from_analytics"])
+        self.assertFalse(response.json()["external_ai_consent_recorded"])
+        self.assertIsNone(response.json()["lead_id"])
+        extract.assert_called_once()
 
     def test_card_scan_requires_explicit_ai_processing_consent(self):
         image = io.BytesIO()
