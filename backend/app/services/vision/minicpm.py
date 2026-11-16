@@ -14,7 +14,9 @@ TEMPLATE_WARNING = "This image looks like a card template or mockup. Upload a ph
 _TEMPLATE = re.compile(
     r'\b(?:business\s+card\s+(?:template|sample)|(?:card\s+)?mockup|editable\s+template|'
     r'company\s+logo|your\s+(?:full\s+)?name|street\s+address\s+here|websitename\.com|'
-    r'username|urname@email\.com|yourname@|(?<![\w@.])email\.com)\b', re.I,
+    r'street\s+name\s+city\s+name|www\.website\.com|youremail@website\.com|'
+    r'000[.\s-]*123[.\s-]*45678|username|urname@email\.com|yourname@|'
+    r'(?<![\w@.])email\.com)\b', re.I,
 )
 _LABEL = re.compile(r'^(full name|name|company|organization|job title|title|position|role|address)\s*:\s*(.+)$', re.I)
 _LABEL_FIELDS = {'full name': 'full_name', 'name': 'full_name', 'company': 'company', 'organization': 'company',

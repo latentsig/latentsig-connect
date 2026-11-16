@@ -48,6 +48,13 @@ jobs:
         with:
           project_id: refined-outlet-249712
 
+      - name: Verify production backup before deployment
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
+            --command="sudo env BACKUP_BUCKET=$GCP_BACKUP_BUCKET bash /opt/latentsig-connect/deploy/gcp/operations.sh backup"
+
       - name: Package committed source
         run: git archive --format=tar.gz --output="$RUNNER_TEMP/latentsig-connect.tar.gz" HEAD
 

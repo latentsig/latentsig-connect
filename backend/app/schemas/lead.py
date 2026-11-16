@@ -1,7 +1,11 @@
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
-INTERESTS = {"AI Agents", "Data & Analytics", "Automation", "Software Development", "QA / Testing", "Product Development", "Partnership", "Other"}
+INTERESTS = {
+    "AI Agents", "Agentic AI Platform", "Annotation & Verification", "AI R&D", "AI Consulting", "AI Advisory",
+    "Web & Mobile Apps", "Data & Analytics", "Automation", "Software Development", "QA / Testing",
+    "Product Development", "Partnership", "Other",
+}
 INTENTS = {"I have a project", "I need a demo", "I am looking for a technology partner", "Partnership opportunity", "Investment / business discussion", "I want to explore LatentSig services", "Just connecting", "Other"}
 
 
@@ -30,6 +34,7 @@ class LeadSubmission(BaseModel):
     follow_up_consent: bool = False
     capture_method: Literal["manual", "business_card"] = "manual"
     event_slug: str | None = Field(default=None, max_length=120)
+    session_slug: str | None = Field(default=None, max_length=120)
     captured_by: str | None = Field(default=None, max_length=180)
     business_card_token: str | None = Field(default=None, max_length=36)
     business_card_back_token: str | None = Field(default=None, max_length=36)
@@ -46,7 +51,7 @@ class LeadSubmission(BaseModel):
             return f"https://{value}"
         return value
 
-    @field_validator("full_name", "company", "job_title", "address", "other_interest_details", "other_intent_details", "requirement_message", "source", "captured_by", "utm_source", "utm_medium", "utm_campaign")
+    @field_validator("full_name", "company", "job_title", "address", "other_interest_details", "other_intent_details", "requirement_message", "source", "captured_by", "utm_source", "utm_medium", "utm_campaign", "event_slug", "session_slug")
     @classmethod
     def remove_control_characters(cls, value: str | None) -> str | None:
         return _strip_control_characters(value)

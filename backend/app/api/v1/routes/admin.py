@@ -11,12 +11,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import current_user, require_roles
-from app.db.models import AuditLog, BusinessCard, Event, IntegrationJob, Interaction, Lead, LeadNote, User
+from app.db.models import AuditLog, BusinessCard, Event, EventProfile, IntegrationJob, Interaction, Lead, LeadNote, StaffCardCapture, User
 from app.db.session import get_db
 from app.services.storage.business_cards import storage
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-STATUSES = {"new", "contacted", "qualified", "meeting", "proposal", "won", "follow_up_later", "not_interested", "lost"}
+STATUSES = {"new", "pending_review", "contacted", "qualified", "meeting", "proposal", "won", "follow_up_later", "not_interested", "lost"}
 ROLES = {"ADMIN", "MANAGER", "SALES", "VIEWER"}
 
 
@@ -47,11 +47,18 @@ class EventInput(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
     location: str | None = Field(default=None, max_length=180)
+    venue: str | None = Field(default=None, max_length=180)
+    profile_id: uuid.UUID | None = None
     is_active: bool = True
 
 
-def _latest_interaction():
-    latest = select(Interaction.lead_id.label("lead_id"), func.max(Interaction.created_at).label("created_at")).group_by(Interaction.lead_id).subquery()
+def _latest_interaction(event_slug: str | None = None):
+    latest_query = select(Interaction.lead_id.label("lead_id"), func.max(Interaction.created_at).label("created_at")).where(
+        Interaction.synthetic_test.is_(False), Interaction.exclude_from_analytics.is_(False),
+    )
+    if event_slug:
+        latest_query = latest_query.join(Event, Event.id == Interaction.event_id).where(Event.slug == event_slug)
+    latest = latest_query.group_by(Interaction.lead_id).subquery()
     return select(Lead, Interaction).join(latest, latest.c.lead_id == Lead.id).join(
         Interaction, (Interaction.lead_id == Lead.id) & (Interaction.created_at == latest.c.created_at)
     )
@@ -159,7 +166,7 @@ def list_leads(
     page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db), user: User = Depends(current_user),
 ):
-    query = _filter_query(_latest_interaction(), search, event, status, interest, intent, captured_by, assigned_to, capture_method, date_from, date_to, user)
+    query = _filter_query(_latest_interaction(event), search, None, status, interest, intent, captured_by, assigned_to, capture_method, date_from, date_to, user)
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     sort_columns = {
         "created_at": Interaction.created_at, "full_name": Lead.full_name,
@@ -325,11 +332,17 @@ def delete_lead(lead_id: uuid.UUID, db: Session = Depends(get_db), user: User = 
     if lead is None:
         raise HTTPException(status_code=404, detail="Lead not found.")
     cards = db.scalars(select(BusinessCard).where(BusinessCard.lead_id == lead.id)).all()
+    captures = db.scalars(select(StaffCardCapture).where(StaffCardCapture.lead_id == lead.id)).all()
     db.add(AuditLog(user_id=user.id, action="lead_deleted", entity_type="lead", entity_id=str(lead.id), metadata_json={"lead_code": lead.lead_code}))
+    paths = {card.storage_path for card in cards}
+    paths.update(card.back_storage_path for card in cards if card.back_storage_path)
+    paths.update(capture.storage_path for capture in captures)
+    for path in paths:
+        storage.delete(path)
+    for capture in captures:
+        db.delete(capture)
     for card in cards:
-        storage.delete(card.storage_path)
-        if card.back_storage_path:
-            storage.delete(card.back_storage_path)
+        db.delete(card)
     db.delete(lead)
     db.commit()
 
@@ -356,12 +369,20 @@ def update_team_member(user_id: uuid.UUID, payload: UserUpdate, db: Session = De
 @router.get("/events")
 def list_events(db: Session = Depends(get_db), user: User = Depends(current_user)):
     events = db.scalars(select(Event).order_by(Event.start_date.desc().nullslast(), Event.name)).all()
-    return [{"id": str(item.id), "name": item.name, "slug": item.slug, "start_date": item.start_date.isoformat() if item.start_date else None, "end_date": item.end_date.isoformat() if item.end_date else None, "location": item.location, "is_active": item.is_active} for item in events]
+    return [{"id": str(item.id), "name": item.name, "slug": item.slug, "start_date": item.start_date.isoformat() if item.start_date else None, "end_date": item.end_date.isoformat() if item.end_date else None, "location": item.location, "venue": item.venue, "profile_id": str(item.profile_id) if item.profile_id else None, "is_active": item.is_active} for item in events]
 
 
 @router.post("/events", status_code=201)
-def create_event(payload: EventInput, db: Session = Depends(get_db), user: User = Depends(require_roles("ADMIN"))):
-    event = Event(**payload.model_dump())
+def create_event(payload: EventInput, db: Session = Depends(get_db), user: User = Depends(require_roles("ADMIN", "MANAGER"))):
+    event_values = payload.model_dump()
+    profile_id = event_values.get("profile_id")
+    if profile_id:
+        profile = db.get(EventProfile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=422, detail="Choose a valid event profile.")
+        event_values["location"] = event_values.get("location") or profile.location
+        event_values["venue"] = event_values.get("venue") or profile.venue
+    event = Event(**event_values)
     db.add(event)
     db.flush()
     db.add(AuditLog(user_id=user.id, action="event_created", entity_type="event", entity_id=str(event.id), metadata_json={"slug": event.slug}))
@@ -374,6 +395,8 @@ def update_event(event_id: uuid.UUID, payload: EventInput, db: Session = Depends
     event = db.get(Event, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found.")
+    if payload.profile_id and db.get(EventProfile, payload.profile_id) is None:
+        raise HTTPException(status_code=422, detail="Choose a valid event profile.")
     for key, value in payload.model_dump().items():
         setattr(event, key, value)
     db.add(AuditLog(user_id=user.id, action="event_updated", entity_type="event", entity_id=str(event.id), metadata_json={"slug": event.slug, "active": event.is_active}))

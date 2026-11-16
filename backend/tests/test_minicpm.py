@@ -53,6 +53,19 @@ class MiniCPMParsingTests(unittest.TestCase):
     def test_template_markers_clear_demo_fields(self):
         result = parse_transcription('BUSINESS CARD TEMPLATE\nMira Sen\nNorthstar Systems\nmira@example.com')
         self.assertTrue(result.is_template)
+
+    def test_jhon_michai_designed_sample_card_placeholders_are_template_markers(self):
+        result = parse_transcription(
+            "JHON MICHAI\nGraphic Designer\nDesign Studio\n"
+            "www.website.com\nyouremail@website.com\n"
+            "805 STREET NAME CITY NAME\n000.123.45678"
+        )
+        self.assertTrue(result.is_template)
+        self.assertIsNone(result.full_name)
+        self.assertIsNone(result.company)
+        self.assertIsNone(result.email)
+        self.assertIsNone(result.phone)
+        self.assertIsNone(result.website)
         self.assertIsNone(result.full_name)
         self.assertIsNone(result.company)
         self.assertIsNone(result.email)

@@ -10,7 +10,7 @@ async function acceptNotice(page: Page, allowFollowUp = true) {
 }
 
 async function acceptAiImageNotice(page: Page) {
-  const checkbox = page.getByRole('checkbox', { name: /I agree to send this card image/ })
+  const checkbox = page.getByRole('checkbox', { name: /I agree LatentSig may process this card image/ })
   if (await checkbox.count()) await checkbox.check()
 }
 
@@ -99,7 +99,7 @@ test('Other interest asks for details and the team can review them on the lead',
   await page.getByRole('button', { name: /connect with latentsig/i }).click()
   await expect(page.getByText('Please explain your interest in 5 words or fewer.')).toBeVisible()
   await detailsField.fill(details)
-  await page.getByPlaceholder('Share your thoughts with us').fill(feedback)
+  await page.getByPlaceholder('Share a little context about your request').fill(feedback)
   await acceptNotice(page)
   await page.getByRole('button', { name: /connect with latentsig/i }).click()
   await expect(page).toHaveURL(/\/connect\/thank-you$/)
@@ -131,10 +131,10 @@ test('Other discussion shows its explanation and feedback inline', async ({ page
   await expect(prompt).toBeVisible()
   const detailsField = page.getByPlaceholder('e.g. RAG agent')
   await expect(detailsField).toBeVisible()
-  await expect(page.getByText('How did you feel? What could we improve?')).toBeVisible()
+  await expect(page.getByText('Anything else you’d like us to know?')).toBeVisible()
   await detailsField.fill('RAG agent for support')
   await expect(page.getByText('4 / 5 words')).toBeVisible()
-  await page.getByPlaceholder('Share your thoughts with us').fill('Please add a link to learn about your services.')
+  await page.getByPlaceholder('Share a little context about your request').fill('Please add a link to learn about your services.')
   await acceptNotice(page)
   await page.getByRole('button', { name: /connect with latentsig/i }).click()
   await expect(page).toHaveURL(/\/connect\/thank-you$/)
@@ -150,6 +150,12 @@ test('local admin login accepts only an approved email and has no password or Go
 })
 
 test('team member can sign in and admins can review captured leads', async ({ page }) => {
+  // Provision the second allowlisted team member in the disposable test database
+  // so the assignment workflow has an active assignee to choose.
+  const seedMember = await page.request.post('/api/v1/auth/email-login', { data: { email: 'bhoomika@latentsig.com' } })
+  expect(seedMember.ok()).toBeTruthy()
+  const seedLogout = await page.request.post('/api/v1/auth/logout')
+  expect(seedLogout.ok()).toBeTruthy()
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.goto('/admin/login')
   await expect(page.getByLabel('Password')).toHaveCount(0)

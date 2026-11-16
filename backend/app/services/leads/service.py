@@ -1,14 +1,16 @@
 import re
 import hashlib
+import uuid
+from difflib import SequenceMatcher
 
 import phonenumbers
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import AuditLog, BusinessCard, Event, IntegrationJob, Interaction, Lead, now_utc
+from app.db.models import AuditLog, BusinessCard, Event, EventRegistrant, EventSession, IntegrationJob, Interaction, Lead, now_utc
 from app.schemas.lead import LeadSubmission
 from app.services.storage.business_cards import StagedUploadMissing, storage
 
@@ -23,7 +25,9 @@ def normalize_phone(raw: str) -> tuple[str, str | None]:
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164), phonenumbers.region_code_for_number(parsed)
 
 
-def _lead_code(event: Event) -> str:
+def _lead_code(event: Event | None) -> str:
+    if event is None:
+        return f"LS-DIRECT-{uuid.uuid4().hex[:10].upper()}"
     prefix = re.sub(r"[^A-Za-z0-9]+", "-", event.slug).strip("-").upper()
     if len(prefix) > 22:
         prefix = f"{prefix[:17].rstrip('-')}-{hashlib.sha1(event.slug.encode()).hexdigest()[:4].upper()}"
@@ -42,6 +46,53 @@ def _idempotent_result(db: Session, key: str) -> dict[str, str | bool] | None:
     return {"id": str(lead.id), "lead_code": lead.lead_code, "interaction_id": str(interaction.id), "created": bool(interaction.submission_created)}
 
 
+def link_event_research_registrants(db: Session, event: Event, lead: Lead) -> None:
+    email = (lead.normalized_email or "").strip().casefold()
+    phone_digits = re.sub(r"\D", "", lead.normalized_phone or "")
+    name = re.sub(r"[^a-z0-9]", "", (lead.full_name or "").casefold())
+    company = re.sub(r"[^a-z0-9]", "", (lead.company or "").casefold())
+    clauses = []
+    if email:
+        clauses.append(func.lower(func.trim(EventRegistrant.email)) == email)
+    if phone_digits:
+        normalized_source_phone = EventRegistrant.phone
+        for character in ("+", " ", "-", "(", ")", ".", "/"):
+            normalized_source_phone = func.replace(normalized_source_phone, character, "")
+        clauses.append(normalized_source_phone == phone_digits)
+    name_token = next(iter(re.findall(r"[a-z0-9]+", (lead.full_name or "").casefold())), "")
+    company_token = next(iter(re.findall(r"[a-z0-9]+", (lead.company or "").casefold())), "")
+    if name_token and company_token:
+        clauses.append((EventRegistrant.full_name.ilike(f"%{name_token}%")) & EventRegistrant.company.ilike(f"%{company_token}%"))
+    if not clauses:
+        return
+    candidates = db.scalars(select(EventRegistrant).where(EventRegistrant.event_id == event.id, or_(*clauses)).limit(5000)).all()
+    high: list[EventRegistrant] = []
+    possible: list[EventRegistrant] = []
+    for registrant in candidates:
+        same_email = bool(email and registrant.email and email == registrant.email.strip().casefold())
+        same_phone = bool(phone_digits and registrant.phone and phone_digits == re.sub(r"\D", "", registrant.phone))
+        candidate_name = re.sub(r"[^a-z0-9]", "", (registrant.full_name or "").casefold())
+        candidate_company = re.sub(r"[^a-z0-9]", "", (registrant.company or "").casefold())
+        same_name_company = bool(name and company and name == candidate_name and company == candidate_company)
+        name_score = SequenceMatcher(None, name, candidate_name).ratio() if name and candidate_name else 0
+        company_score = SequenceMatcher(None, company, candidate_company).ratio() if company and candidate_company else 0
+        if same_email or same_phone or same_name_company:
+            high.append(registrant)
+        elif name_score >= 0.90 and company_score >= 0.88:
+            possible.append(registrant)
+    if len(high) == 1:
+        registrant = high[0]
+        if registrant.matched_lead_id in (None, lead.id):
+            registrant.matched_lead_id = lead.id
+            registrant.match_status = "matched"
+        else:
+            registrant.match_status = "suggested"
+    elif high or possible:
+        for registrant in [*high, *possible]:
+            if registrant.matched_lead_id != lead.id:
+                registrant.match_status = "suggested"
+
+
 def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key: str | None = None) -> dict[str, str | bool]:
     if idempotency_key:
         previous = _idempotent_result(db, idempotency_key)
@@ -54,13 +105,25 @@ def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key
         raise HTTPException(status_code=422, detail="Business-card images can only be submitted with the card-review flow.")
     phone, phone_country = normalize_phone(payload.phone)
     email = str(payload.email).strip().lower()
-    event_slug = payload.event_slug or settings.default_event_slug
-    event = db.scalar(select(Event).where(Event.slug == event_slug, Event.is_active.is_(True)).with_for_update())
-    if event is None:
-        raise HTTPException(status_code=422, detail="This event link is not active. Please ask the LatentSig team for help.")
+    event = None
+    session = None
+    if payload.event_slug:
+        event = db.scalar(select(Event).where(Event.slug == payload.event_slug, Event.is_active.is_(True)).with_for_update())
+        if event is None:
+            raise HTTPException(status_code=422, detail="This event link is not active. Please ask the LatentSig team for help.")
+    if payload.session_slug:
+        if event is None:
+            raise HTTPException(status_code=422, detail="Choose an event before selecting one of its sessions.")
+        session = db.scalar(select(EventSession).where(
+            EventSession.event_id == event.id,
+            EventSession.slug == payload.session_slug,
+            EventSession.is_active.is_(True),
+        ))
+        if session is None:
+            raise HTTPException(status_code=422, detail="This event session is not active. Please ask the LatentSig team for help.")
 
-    lead = db.scalar(select(Lead).where(Lead.normalized_email == email))
-    if lead is None:
+    lead = db.scalar(select(Lead).where(Lead.normalized_email == email)) if email else None
+    if lead is None and phone:
         lead = db.scalar(select(Lead).where(Lead.normalized_phone == phone))
     created = lead is None
     if lead is None:
@@ -87,7 +150,8 @@ def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key
         lead.address = payload.address or lead.address
 
     interaction = Interaction(
-        lead_id=lead.id, event_id=event.id, interest=payload.interest, intent=payload.intent,
+        lead_id=lead.id, event_id=event.id if event else None, session_id=session.id if session else None,
+        interest=payload.interest, intent=payload.intent,
         other_interest_details=payload.other_interest_details, other_intent_details=payload.other_intent_details,
         requirement_message=payload.requirement_message, capture_method=payload.capture_method,
         data_processing_consent_at=now_utc(),
@@ -98,6 +162,8 @@ def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key
         utm_source=payload.utm_source, utm_medium=payload.utm_medium,
         utm_campaign=payload.utm_campaign, status="new",
     )
+    if event:
+        link_event_research_registrants(db, event, lead)
     db.add(interaction)
     db.flush()
 
@@ -127,7 +193,7 @@ def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key
             if not token:
                 continue
             metadata = staged_metadata[side]
-            path, size = storage.attach(token, event.slug, lead.lead_code, metadata["mime_type"])
+            path, size = storage.attach(token, event.slug if event else "unattributed", lead.lead_code, metadata["mime_type"])
             attached_storage_paths.append(path)
             if side == "front":
                 front_storage_path, front_file_size = path, size
