@@ -2,6 +2,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from collections import Counter
+from datetime import date
 from time import perf_counter
 
 from fastapi import FastAPI
@@ -16,7 +17,10 @@ from app.api.v1.routes.leads import router as leads_router
 from app.api.v1.routes.ocr import router as ocr_router
 from app.api.v1.routes.auth import router as auth_router
 from app.api.v1.routes.admin import router as admin_router
+from app.api.v1.routes.event_workspaces import router as event_workspaces_router
 from app.api.v1.routes.exports import router as exports_router
+from app.api.v1.routes.research import router as research_router
+from app.api.v1.routes.staff_capture import router as staff_capture_router
 from app.db.models import Event
 from app.services.storage.business_cards import storage
 from app.services.backup import create_backup
@@ -41,7 +45,16 @@ async def lifespan(_: FastAPI):
         with SessionLocal() as db:
             event = db.scalar(select(Event).where(Event.slug == settings.default_event_slug))
             if event is None:
-                db.add(Event(name="Bengaluru Tech Summit 2026", slug=settings.default_event_slug, location="Bengaluru", is_active=True))
+                db.add(Event(
+                    name="Bengaluru Tech Summit 2026", slug=settings.default_event_slug,
+                    start_date=date(2026, 11, 17), end_date=date(2026, 11, 19),
+                    location="Bengaluru", is_active=True,
+                ))
+                db.commit()
+            elif settings.default_event_slug == "bts-2026":
+                event.start_date = date(2026, 11, 17)
+                event.end_date = date(2026, 11, 19)
+                event.location = event.location or "Bengaluru"
                 db.commit()
     backup_task = None
     if settings.database_url.startswith("sqlite:") and not app.dependency_overrides:
@@ -88,6 +101,9 @@ app.include_router(leads_router, prefix="/api/v1")
 app.include_router(ocr_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(event_workspaces_router, prefix="/api/v1")
+app.include_router(research_router, prefix="/api/v1")
+app.include_router(staff_capture_router, prefix="/api/v1")
 app.include_router(exports_router, prefix="/api/v1")
 
 

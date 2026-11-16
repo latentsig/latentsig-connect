@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import time
+from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -10,7 +11,7 @@ from pydantic import ValidationError
 from app.core.config import settings
 from app.services.vision.exceptions import VisionConfigurationError, VisionUnavailable
 from app.services.vision.prompts import SYSTEM_PROMPT
-from app.services.vision.minicpm import parse_transcription, prepare_image
+from app.services.vision.minicpm import has_placeholder_contact_markers, parse_transcription, prepare_image
 from app.services.vision.schemas import CardExtraction
 from app.services.vision.vertex import build_request as build_vertex_request
 
@@ -81,10 +82,19 @@ def _request(images: list[tuple[bytes, str]], deadline: float | None = None) -> 
     if provider != "vertex":
         request = Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     try:
+        parsed_endpoint = urlsplit(request.full_url)
+    except ValueError:
+        raise VisionConfigurationError("OCR endpoint must be a valid HTTP(S) URL.") from None
+    if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.hostname or parsed_endpoint.username or parsed_endpoint.password:
+        raise VisionConfigurationError("OCR endpoint must be an HTTP(S) URL with a hostname and no embedded credentials.")
+    if provider in {"openrouter", "vertex"} and parsed_endpoint.scheme != "https":
+        raise VisionConfigurationError("External OCR endpoints must use HTTPS.")
+    try:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError
-        with urlopen(request, timeout=remaining) as response:
+        # Scheme validation above rejects local-file and custom URL handlers.
+        with urlopen(request, timeout=remaining) as response:  # nosec B310
             body = json.loads(response.read())
         if time.monotonic() >= deadline:
             raise TimeoutError
@@ -108,8 +118,14 @@ def _request(images: list[tuple[bytes, str]], deadline: float | None = None) -> 
             text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
         parsed = CardExtraction.model_validate_json(text)
         # Treat blank strings as missing rather than propagating phantom values.
+        model_values = parsed.model_dump()
+        placeholder_text = "\n".join(
+            model_values[field] or ""
+            for field in ("full_name", "company", "job_title", "email", "phone", "website", "address")
+        )
+        model_values["is_template"] = parsed.is_template or has_placeholder_contact_markers(placeholder_text)
         cleaned = {key: (None if isinstance(value, str) and not value.strip() else value)
-            for key, value in parsed.model_dump().items()}
+            for key, value in model_values.items()}
         if cleaned["is_template"]:
             for field in ("full_name", "company", "job_title", "email", "phone", "website", "address"):
                 cleaned[field] = None

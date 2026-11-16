@@ -1,5 +1,6 @@
 import re
 import hashlib
+import uuid
 
 import phonenumbers
 from fastapi import HTTPException
@@ -8,8 +9,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import AuditLog, BusinessCard, Event, IntegrationJob, Interaction, Lead, now_utc
+from app.db.models import AuditLog, BusinessCard, Event, EventSession, IntegrationJob, Interaction, Lead, now_utc
 from app.schemas.lead import LeadSubmission
+from app.services.research_matching import link_event_research_registrants
 from app.services.storage.business_cards import StagedUploadMissing, storage
 
 
@@ -23,10 +25,12 @@ def normalize_phone(raw: str) -> tuple[str, str | None]:
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164), phonenumbers.region_code_for_number(parsed)
 
 
-def _lead_code(event: Event) -> str:
+def _lead_code(event: Event | None) -> str:
+    if event is None:
+        return f"LS-DIRECT-{uuid.uuid4().hex[:10].upper()}"
     prefix = re.sub(r"[^A-Za-z0-9]+", "-", event.slug).strip("-").upper()
     if len(prefix) > 22:
-        prefix = f"{prefix[:17].rstrip('-')}-{hashlib.sha1(event.slug.encode()).hexdigest()[:4].upper()}"
+        prefix = f"{prefix[:17].rstrip('-')}-{hashlib.sha1(event.slug.encode(), usedforsecurity=False).hexdigest()[:4].upper()}"
     next_number = event.next_lead_number
     event.next_lead_number = next_number + 1
     return f"LS-{prefix}-{next_number:06d}"
@@ -54,13 +58,25 @@ def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key
         raise HTTPException(status_code=422, detail="Business-card images can only be submitted with the card-review flow.")
     phone, phone_country = normalize_phone(payload.phone)
     email = str(payload.email).strip().lower()
-    event_slug = payload.event_slug or settings.default_event_slug
-    event = db.scalar(select(Event).where(Event.slug == event_slug, Event.is_active.is_(True)).with_for_update())
-    if event is None:
-        raise HTTPException(status_code=422, detail="This event link is not active. Please ask the LatentSig team for help.")
+    event = None
+    session = None
+    if payload.event_slug:
+        event = db.scalar(select(Event).where(Event.slug == payload.event_slug, Event.is_active.is_(True)).with_for_update())
+        if event is None:
+            raise HTTPException(status_code=422, detail="This event link is not active. Please ask the LatentSig team for help.")
+    if payload.session_slug:
+        if event is None:
+            raise HTTPException(status_code=422, detail="Choose an event before selecting one of its sessions.")
+        session = db.scalar(select(EventSession).where(
+            EventSession.event_id == event.id,
+            EventSession.slug == payload.session_slug,
+            EventSession.is_active.is_(True),
+        ))
+        if session is None:
+            raise HTTPException(status_code=422, detail="This event session is not active. Please ask the LatentSig team for help.")
 
-    lead = db.scalar(select(Lead).where(Lead.normalized_email == email))
-    if lead is None:
+    lead = db.scalar(select(Lead).where(Lead.normalized_email == email)) if email else None
+    if lead is None and phone:
         lead = db.scalar(select(Lead).where(Lead.normalized_phone == phone))
     created = lead is None
     if lead is None:
@@ -87,7 +103,8 @@ def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key
         lead.address = payload.address or lead.address
 
     interaction = Interaction(
-        lead_id=lead.id, event_id=event.id, interest=payload.interest, intent=payload.intent,
+        lead_id=lead.id, event_id=event.id if event else None, session_id=session.id if session else None,
+        interest=payload.interest, intent=payload.intent,
         other_interest_details=payload.other_interest_details, other_intent_details=payload.other_intent_details,
         requirement_message=payload.requirement_message, capture_method=payload.capture_method,
         data_processing_consent_at=now_utc(),
@@ -98,6 +115,8 @@ def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key
         utm_source=payload.utm_source, utm_medium=payload.utm_medium,
         utm_campaign=payload.utm_campaign, status="new",
     )
+    if event:
+        link_event_research_registrants(db, event, lead)
     db.add(interaction)
     db.flush()
 
@@ -127,7 +146,7 @@ def create_lead_submission(db: Session, payload: LeadSubmission, idempotency_key
             if not token:
                 continue
             metadata = staged_metadata[side]
-            path, size = storage.attach(token, event.slug, lead.lead_code, metadata["mime_type"])
+            path, size = storage.attach(token, event.slug if event else "unattributed", lead.lead_code, metadata["mime_type"])
             attached_storage_paths.append(path)
             if side == "front":
                 front_storage_path, front_file_size = path, size

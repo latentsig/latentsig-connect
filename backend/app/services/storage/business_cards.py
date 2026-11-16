@@ -82,6 +82,23 @@ class BusinessCardStorage:
         staged.with_suffix(".json").unlink(missing_ok=True)
         return str(destination.relative_to(self.root)), size
 
+    def save_private(self, data: bytes, event_slug: str, category: str, suffix: str, content_type: str) -> tuple[str, int]:
+        safe_event = re.sub(r"[^A-Za-z0-9_-]", "", event_slug) or "unattributed"
+        safe_category = re.sub(r"[^A-Za-z0-9_-]", "", category)
+        safe_suffix = suffix.lower()
+        if safe_category not in {"staff-card-captures", "research-workbooks"} or safe_suffix not in {".jpg", ".png", ".webp", ".xlsx", ".xlsm"}:
+            raise ValueError("Unsupported private file type")
+        key = f"{safe_category}/{safe_event}/{datetime.now(timezone.utc):%Y-%m-%d}/{uuid.uuid4().hex}{safe_suffix}"
+        if self.provider == "s3":
+            self.s3.put_object(Bucket=settings.storage_bucket, Key=key, Body=data, ContentType=content_type, ServerSideEncryption="AES256")
+            return key, len(data)
+        destination = (self.root / key).resolve()
+        if self.root not in destination.parents:
+            raise ValueError("Invalid private storage path")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        return str(destination.relative_to(self.root)), len(data)
+
     def read(self, storage_path: str) -> bytes:
         if self.provider == "s3":
             result = self.s3.get_object(Bucket=settings.storage_bucket, Key=storage_path)

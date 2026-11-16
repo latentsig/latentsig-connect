@@ -1,5 +1,6 @@
 import io
 from contextlib import redirect_stdout
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -31,7 +32,7 @@ class DeploymentArchiveTests(unittest.TestCase):
                 'backend/alembic/versions/0001.py', 'backend/.env.example',
             ])
             extract_source(source, destination)
-            self.assertEqual(sorted(str(path.relative_to(destination)) for path in destination.rglob('*') if path.is_file()),
+            self.assertEqual(sorted(path.relative_to(destination).as_posix() for path in destination.rglob('*') if path.is_file()),
                              ['backend/.env.example', 'backend/alembic/versions/0001.py'])
             self.assertEqual((destination / 'backend/alembic/versions/0001.py').read_text(), 'revision = "real_revision"\n')
 
@@ -75,17 +76,18 @@ class DeploymentArchiveTests(unittest.TestCase):
             self.assertIn(b'OLLAMA_MODEL=openbmb/minicpm-ocr1.0\r\n', result)
             self.assertIn(b'OCR_TIMEOUT_SECONDS=85\r\n', result)
             self.assertIn(b'OCR_MAX_RETRIES=0\r\n', result)
-            self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
+            if os.name == 'posix':
+                self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
 
     def test_provider_switches_both_ways_and_repeated_choice_is_byte_stable(self):
         with tempfile.TemporaryDirectory() as directory:
             secrets_dir = Path(directory) / 'secrets'
             secrets_dir.mkdir()
             environment = secrets_dir / 'production.env'
-            environment.write_text(
-                'OPENROUTER_API_KEY=private-key\nOCR_ENABLED=false\nOCR_PROVIDER=ollama\n'
-                'OLLAMA_BASE_URL=http://custom-ollama:11434\nOLLAMA_MODEL=custom:model\n'
-                'OCR_TIMEOUT_SECONDS=91\nOCR_MAX_RETRIES=2\n')
+            environment.write_bytes(
+                b'OPENROUTER_API_KEY=private-key\nOCR_ENABLED=false\nOCR_PROVIDER=ollama\n'
+                b'OLLAMA_BASE_URL=http://custom-ollama:11434\nOLLAMA_MODEL=custom:model\n'
+                b'OCR_TIMEOUT_SECONDS=91\nOCR_MAX_RETRIES=2\n')
             with patch.object(runtime, 'SECRETS', secrets_dir):
                 runtime.select_ocr_provider('openrouter')
                 runtime.select_ocr_provider('ollama')
@@ -108,10 +110,10 @@ class DeploymentArchiveTests(unittest.TestCase):
             secrets_dir = Path(directory) / 'secrets'
             secrets_dir.mkdir()
             environment = secrets_dir / 'production.env'
-            environment.write_text(
-                'OCR_ENABLED=false\nOCR_PROVIDER=ollama\n'
-                'GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n'
-                'OPENROUTER_API_KEY=private-key\nOLLAMA_MODEL=custom:model\n')
+            environment.write_bytes(
+                b'OCR_ENABLED=false\nOCR_PROVIDER=ollama\n'
+                b'GOOGLE_CLOUD_PROJECT=refined-outlet-249712\n'
+                b'OPENROUTER_API_KEY=private-key\nOLLAMA_MODEL=custom:model\n')
             with patch.object(runtime, 'SECRETS', secrets_dir):
                 runtime.select_ocr_provider('vertex')
                 selected = environment.read_bytes()
@@ -336,7 +338,8 @@ class DeploymentArchiveTests(unittest.TestCase):
                     runtime.select_ocr_provider('openrouter')
             self.assertIn('openrouter', output.getvalue())
             self.assertNotIn('private-key', output.getvalue())
-            self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
+            if os.name == 'posix':
+                self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == '__main__':

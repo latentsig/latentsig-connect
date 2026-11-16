@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     frontend_urls: str = "http://localhost:5173,http://127.0.0.1:5173"
     whatsapp_number: str = ""
     max_upload_bytes: int = 10 * 1024 * 1024
+    max_workbook_upload_bytes: int = 25 * 1024 * 1024
     default_phone_region: str = "IN"
     default_event_slug: str = "bts-2026"
     private_storage_dir: Path = BACKEND_ROOT / "private_storage"
@@ -44,6 +45,8 @@ class Settings(BaseSettings):
     ocr_max_retries: int = 2
     ocr_max_output_tokens: int = 1000
     ocr_enabled: bool = True
+    staff_card_processing_rules_approved: bool = False
+    staff_card_external_ai_consent_notice_version: str = "staff-card-ai-v1"
     google_service_account_json: str = ""
     google_service_account_email: str = ""
     google_private_key: str = ""
