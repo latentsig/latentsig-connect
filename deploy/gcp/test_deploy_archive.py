@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from extract_source import extract_source
+from smoke import multipart_form
 import runtime
 
 
@@ -340,6 +341,27 @@ class DeploymentArchiveTests(unittest.TestCase):
             self.assertNotIn('private-key', output.getvalue())
             if os.name == 'posix':
                 self.assertEqual(environment.stat().st_mode & 0o777, 0o600)
+
+
+class SmokeMultipartTests(unittest.TestCase):
+    def test_multipart_form_keeps_binary_image_and_fields(self):
+        image = b'\xff\xd8synthetic-image\x00bytes\xff\xd9'
+        content_type, body = multipart_form(
+            {'event_id': 'event-123', 'synthetic_test': 'true', 'external_ai_consent': 'false'},
+            'file', 'jhon-michai.jpg', 'image/jpeg', image, boundary='smoke-boundary',
+        )
+
+        self.assertEqual(content_type, 'multipart/form-data; boundary=smoke-boundary')
+        self.assertIn(b'name="event_id"\r\n\r\nevent-123', body)
+        self.assertIn(b'name="synthetic_test"\r\n\r\ntrue', body)
+        self.assertIn(b'name="external_ai_consent"\r\n\r\nfalse', body)
+        self.assertIn(b'name="file"; filename="jhon-michai.jpg"', body)
+        self.assertIn(b'Content-Type: image/jpeg\r\n\r\n' + image + b'\r\n', body)
+
+    def test_multipart_form_uses_unique_boundary_by_default(self):
+        first = multipart_form({}, 'file', 'sample.jpg', 'image/jpeg', b'first')[0]
+        second = multipart_form({}, 'file', 'sample.jpg', 'image/jpeg', b'second')[0]
+        self.assertNotEqual(first, second)
 
 
 if __name__ == '__main__':

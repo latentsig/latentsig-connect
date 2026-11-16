@@ -2,6 +2,11 @@ name: Deploy to GCP
 
 on:
   workflow_dispatch:
+    inputs:
+      synthetic_card_base64:
+        description: Optional base64 JPEG for the one-time JHON MICHAI production card smoke
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -87,10 +92,44 @@ jobs:
           set -euo pipefail
           python3 deploy/gcp/smoke.py "https://$PUBLIC_DOMAIN" --public-only
 
+      - name: Prepare synthetic card image
+        if: ${{ inputs.synthetic_card_base64 != '' }}
+        env:
+          SYNTHETIC_CARD_BASE64: ${{ inputs.synthetic_card_base64 }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$SYNTHETIC_CARD_BASE64"
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          data = base64.b64decode(os.environ['SYNTHETIC_CARD_BASE64'], validate=True)
+          if not data.startswith(b'\xff\xd8') or not data.endswith(b'\xff\xd9') or len(data) > 10 * 1024 * 1024:
+              raise SystemExit('Expected a valid JPEG sample smaller than 10 MB.')
+          Path(os.environ['RUNNER_TEMP'], 'latentsig-jhon-michai-smoke.jpg').write_bytes(data)
+          PY
+
+      - name: Copy synthetic card image to VM
+        if: ${{ inputs.synthetic_card_base64 != '' }}
+        run: |
+          set -euo pipefail
+          gcloud compute scp "$RUNNER_TEMP/latentsig-jhon-michai-smoke.jpg" \
+            "$GCP_VM_NAME:/tmp/latentsig-card-smoke-${GITHUB_RUN_ID}.jpg" \
+            --tunnel-through-iap --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID"
+
+      - name: Run consent-aware synthetic card smoke and cleanup
+        if: ${{ inputs.synthetic_card_base64 != '' }}
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
+            --command="sudo python3 /opt/latentsig-connect/deploy/gcp/smoke.py https://$PUBLIC_DOMAIN --synthetic-card /tmp/latentsig-card-smoke-${GITHUB_RUN_ID}.jpg"
+
       - name: Remove temporary deployment files from VM
         if: always() && steps.gcp-auth.outcome == 'success'
         continue-on-error: true
         run: |
           gcloud compute ssh "$GCP_VM_NAME" --tunnel-through-iap \
             --zone="$GCP_ZONE" --project="$GCP_PROJECT_ID" \
-            --command="sudo rm -f /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz"
+            --command="sudo rm -f /tmp/latentsig-connect-${GITHUB_RUN_ID}.tar.gz /tmp/latentsig-card-smoke-${GITHUB_RUN_ID}.jpg"
